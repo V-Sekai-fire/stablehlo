@@ -82,6 +82,7 @@ limitations under the License.
 #include "stablehlo/transforms/Passes.h"
 #include "stablehlo/tools/CCodegen.h"
 #include "stablehlo/tools/COpEmitters.h"
+#include "stablehlo/tools/GDScriptSourceParser.h"
 
 using namespace mlir;
 using namespace llvm;
@@ -125,6 +126,10 @@ static cl::opt<bool> emitAsm("emit-asm",
 static cl::opt<bool> emitC("emit-c",
                            cl::desc("Emit C99 code instead of binary"),
                            cl::init(false));
+
+static cl::opt<bool> inputGDScript("gdscript",
+                                   cl::desc("Input is GDScript source code"),
+                                   cl::init(false));
 
 // Type converter that converts tensor types to memref types
 // This is needed because OneShotBufferizePass doesn't convert function signatures
@@ -1103,29 +1108,76 @@ int main(int argc, char **argv) {
   context.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
 
   llvm::errs() << "Parsing input file: " << inputFilename << "\n";
+  
+  // Check if input is GDScript (by flag or file extension)
+  bool isGDScript = inputGDScript;
+  if (!isGDScript && inputFilename != "-") {
+    std::string filename = inputFilename;
+    if (filename.length() >= 3 && 
+        filename.substr(filename.length() - 3) == ".gd") {
+      isGDScript = true;
+    }
+  }
+  
   // Parse input file
   OwningOpRef<ModuleOp> module;
-  if (inputFilename == "-") {
-    // Read from stdin
-    std::string inputStr;
-    std::string line;
-    while (std::getline(std::cin, line)) {
-      inputStr += line + "\n";
+  if (isGDScript) {
+    // Parse GDScript source code
+    std::string sourceCode;
+    if (inputFilename == "-") {
+      // Read from stdin
+      std::string line;
+      while (std::getline(std::cin, line)) {
+        sourceCode += line + "\n";
+      }
+    } else {
+      // Read from file
+      auto bufferOrError = llvm::MemoryBuffer::getFile(inputFilename);
+      if (auto ec = bufferOrError.getError()) {
+        errs() << "Error: Could not read GDScript file: " << ec.message() << "\n";
+        return 1;
+      }
+      auto buffer = std::move(*bufferOrError);
+      sourceCode = buffer->getBuffer().str();
     }
-    llvm::SourceMgr sourceMgr;
-    sourceMgr.AddNewSourceBuffer(
-        llvm::MemoryBuffer::getMemBuffer(inputStr, "<stdin>"), llvm::SMLoc());
-    module = parseSourceFile<ModuleOp>(sourceMgr, &context);
+    
+    llvm::errs() << "Parsing GDScript source code...\n";
+    if (failed(stablehlo::GDScriptSourceParser::parseToStableHLO(
+            sourceCode, inputFilename, &context, module))) {
+      errs() << "Error: Failed to parse GDScript source code\n";
+      return 1;
+    }
+    
+    if (!module) {
+      errs() << "Error: GDScript parsing produced no module\n";
+      return 1;
+    }
+    
+    llvm::errs() << "Successfully parsed GDScript source code\n";
   } else {
-    module = parseSourceFile<ModuleOp>(inputFilename, &context);
-  }
+    // Parse MLIR file (existing path)
+    if (inputFilename == "-") {
+      // Read from stdin
+      std::string inputStr;
+      std::string line;
+      while (std::getline(std::cin, line)) {
+        inputStr += line + "\n";
+      }
+      llvm::SourceMgr sourceMgr;
+      sourceMgr.AddNewSourceBuffer(
+          llvm::MemoryBuffer::getMemBuffer(inputStr, "<stdin>"), llvm::SMLoc());
+      module = parseSourceFile<ModuleOp>(sourceMgr, &context);
+    } else {
+      module = parseSourceFile<ModuleOp>(inputFilename, &context);
+    }
 
-  if (!module) {
-    errs() << "Error: Could not parse input file\n";
-    return 1;
-  }
+    if (!module) {
+      errs() << "Error: Could not parse input file\n";
+      return 1;
+    }
 
-  llvm::errs() << "Successfully parsed input file\n";
+    llvm::errs() << "Successfully parsed input file\n";
+  }
 
   // Check if we should emit C code
   if (emitC) {

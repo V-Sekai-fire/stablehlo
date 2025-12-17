@@ -23,6 +23,13 @@ set(LLVM_OPTIONAL_SOURCES
   CTypeConverter.cpp
   COpEmitters.cpp
   CIndexUtils.cpp
+  GDScriptSourceParser.cpp
+  GDScriptASTToStableHLO.cpp
+  GDScriptSyscallMap.cpp
+  gdscript_parser/gdscript_parser.cpp
+  gdscript_parser/gdscript_tokenizer.cpp
+  gdscript_parser/gdscript_tokenizer_buffer.cpp
+  gdscript_parser/gdscript_cache.cpp
 )
 
 # stablehlo-opt
@@ -104,12 +111,19 @@ mlir_check_all_link_libraries(stablehlo-lsp-server)
 add_dependencies(check-stablehlo-quick stablehlo-lsp-server)
 
 # stablehlo-codegen
-add_llvm_executable(stablehlo-codegen StablehloCodegenMain.cpp)
+add_llvm_executable(stablehlo-codegen StablehloCodegenMain.cpp PARTIAL_SOURCES_INTENDED)
 target_sources(stablehlo-codegen PRIVATE
   CCodegen.cpp
   CTypeConverter.cpp
   COpEmitters.cpp
   CIndexUtils.cpp
+  GDScriptSourceParser.cpp
+  GDScriptASTToStableHLO.cpp
+  GDScriptSyscallMap.cpp
+  gdscript_parser/gdscript_parser.cpp
+  gdscript_parser/gdscript_tokenizer.cpp
+  gdscript_parser/gdscript_tokenizer_buffer.cpp
+  gdscript_parser/gdscript_cache.cpp
 )
 llvm_update_compile_flags(stablehlo-codegen)
 get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
