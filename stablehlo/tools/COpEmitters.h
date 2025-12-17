@@ -51,6 +51,10 @@ public:
   /// Emit select operation (conditional)
   std::string emitSelect(stablehlo::SelectOp op);
   
+  /// Emit logical operations
+  std::string emitAnd(stablehlo::AndOp op);
+  std::string emitNot(stablehlo::NotOp op);
+  
   /// Emit reduction operation
   std::string emitReduce(stablehlo::ReduceOp op);
   

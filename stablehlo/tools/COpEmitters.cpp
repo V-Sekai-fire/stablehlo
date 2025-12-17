@@ -43,6 +43,8 @@ bool COpEmitters::isSupported(Operation* op) {
          isa<stablehlo::MaxOp>(op) ||
          isa<stablehlo::RemOp>(op) ||
          isa<stablehlo::SelectOp>(op) ||
+         isa<stablehlo::AndOp>(op) ||
+         isa<stablehlo::NotOp>(op) ||
          isa<stablehlo::ConstantOp>(op) ||
          isa<stablehlo::CompareOp>(op) ||
          isa<stablehlo::ReduceOp>(op) ||
@@ -68,6 +70,10 @@ std::string COpEmitters::emitOperation(Operation* op) {
     return emitConstant(constOp);
   } else if (auto cmpOp = dyn_cast<stablehlo::CompareOp>(op)) {
     return emitCompare(cmpOp);
+  } else if (auto andOp = dyn_cast<stablehlo::AndOp>(op)) {
+    return emitAnd(andOp);
+  } else if (auto notOp = dyn_cast<stablehlo::NotOp>(op)) {
+    return emitNot(notOp);
   } else if (auto reduceOp = dyn_cast<stablehlo::ReduceOp>(op)) {
     return emitReduce(reduceOp);
   } else if (auto convOp = dyn_cast<stablehlo::ConvolutionOp>(op)) {
@@ -265,6 +271,49 @@ std::string COpEmitters::emitCompare(stablehlo::CompareOp op) {
   }
   
   return emitElementWiseLoop(op, opStr, op.getLhs(), op.getRhs(), op.getResult());
+}
+
+std::string COpEmitters::emitAnd(stablehlo::AndOp op) {
+  // Logical AND: result = lhs && rhs
+  return emitElementWiseLoop(op, "&&", op.getLhs(), op.getRhs(), op.getResult());
+}
+
+std::string COpEmitters::emitNot(stablehlo::NotOp op) {
+  // Logical NOT: result = !operand
+  std::ostringstream oss;
+  std::string operandName = getValueName(op.getOperand());
+  std::string resultName = getValueName(op.getResult());
+  std::string resultShapeName = getShapeName(op.getResult());
+  
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!resultType) return "";
+  int64_t rank = resultType.getRank();
+  
+  std::vector<std::string> indices;
+  for (int64_t i = 0; i < rank; i++) {
+    indices.push_back("i" + std::to_string(i));
+  }
+  
+  std::string operandIdx = CIndexUtils::generateIndexWithShape(
+      operandName, getShapeName(op.getOperand()), indices, rank);
+  std::string resultIdx = CIndexUtils::generateIndexWithShape(
+      resultName, resultShapeName, indices, rank);
+  
+  std::ostringstream body;
+  body << resultIdx << " = !" << operandIdx << ";";
+  
+  oss << "  {\n";
+  oss << "    " << CIndexUtils::generateLoopVariables(rank) << "\n";
+  std::string loopCode = CIndexUtils::generateNestedLoops(rank, resultShapeName, body.str());
+  std::istringstream loopStream(loopCode);
+  std::string line;
+  while (std::getline(loopStream, line)) {
+    if (!line.empty()) {
+      oss << "    " << line << "\n";
+    }
+  }
+  oss << "  }\n";
+  return oss.str();
 }
 
 std::string COpEmitters::emitReduce(stablehlo::ReduceOp op) {
