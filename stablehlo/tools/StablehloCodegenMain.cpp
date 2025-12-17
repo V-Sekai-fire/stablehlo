@@ -439,7 +439,7 @@ struct ConvertFunctionSignaturesPass
           }
           if (changed) {
             OpBuilder returnBuilder(returnOp);
-            returnBuilder.create<func::ReturnOp>(returnOp.getLoc(), newOperands);
+            func::ReturnOp::create(returnBuilder, returnOp.getLoc(), newOperands);
             returnOp.erase();
           }
         }

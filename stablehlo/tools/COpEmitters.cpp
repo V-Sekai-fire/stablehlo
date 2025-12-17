@@ -96,12 +96,13 @@ std::string COpEmitters::emitConstant(stablehlo::ConstantOp op) {
     std::string elemType = CTypeConverter::convertElementType(tensorType.getElementType());
     
     // Check if it's a splat (single value repeated)
+    // TODO: When implementing constant initialization, extract and use the splat value:
+    //   auto splatValue = denseAttr.getSplatValue<Attribute>();
     if (auto denseAttr = dyn_cast<DenseElementsAttr>(attr)) {
       if (denseAttr.isSplat()) {
-        auto splatValue = denseAttr.getSplatValue<Attribute>();
-        oss << "  // Constant: " << varName << "\n";
+        oss << "  // Constant (splat): " << varName << "\n";
         // For now, just emit a comment - full implementation would extract value
-        oss << "  // TODO: Initialize constant array\n";
+        oss << "  // TODO: Initialize constant array with splat value\n";
         return oss.str();
       }
     }
