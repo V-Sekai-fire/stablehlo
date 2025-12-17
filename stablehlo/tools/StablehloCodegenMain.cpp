@@ -82,6 +82,7 @@ limitations under the License.
 #include "stablehlo/transforms/Passes.h"
 #include "stablehlo/tools/CCodegen.h"
 #include "stablehlo/tools/COpEmitters.h"
+#include "stablehlo/tools/LowerToSupportedOps.h"
 
 using namespace mlir;
 using namespace llvm;
@@ -1058,6 +1059,13 @@ LogicalResult emitRiscVCode(ModuleOp module, StringRef outputPath,
 
 // Generate C99 code from StableHLO module
 LogicalResult generateCCode(ModuleOp module, StringRef outputFile) {
+  // First, lower unsupported operations to supported ones
+  mlir::PassManager pm(module.getContext());
+  pm.addPass(mlir::stablehlo::createLowerToSupportedOpsPass());
+  if (failed(pm.run(module))) {
+    return module.emitError("Failed to lower unsupported operations");
+  }
+  
   stablehlo::CCodeGenerator generator;
   
   // Check for unsupported operations before generating
