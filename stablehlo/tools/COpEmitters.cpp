@@ -180,12 +180,15 @@ std::string COpEmitters::emitElementWiseLoop(
   
   std::ostringstream oss;
   
+  // Scope loop variables to avoid name collisions between operations
+  oss << "  {\n";
+  
   // Generate loop variables
   std::vector<std::string> indices;
   for (int64_t i = 0; i < rank; i++) {
     indices.push_back("i" + std::to_string(i));
   }
-  oss << "  " << CIndexUtils::generateLoopVariables(rank) << "\n";
+  oss << "    " << CIndexUtils::generateLoopVariables(rank) << "\n";
   
   // Generate nested loops
   std::ostringstream body;
@@ -200,7 +203,18 @@ std::string COpEmitters::emitElementWiseLoop(
   
   body << resultIdx << " = " << lhsIdx << " " << opStr << " " << rhsIdx << ";";
   
-  oss << CIndexUtils::generateNestedLoops(rank, resultShapeName, body.str());
+  // Generate nested loops with proper indentation (add 2 spaces for block scope)
+  std::string loopCode = CIndexUtils::generateNestedLoops(rank, resultShapeName, body.str());
+  // Add indentation to each line of the loop code
+  std::istringstream loopStream(loopCode);
+  std::string line;
+  while (std::getline(loopStream, line)) {
+    if (!line.empty()) {
+      oss << "    " << line << "\n";
+    }
+  }
+  
+  oss << "  }\n";
   
   return oss.str();
 }

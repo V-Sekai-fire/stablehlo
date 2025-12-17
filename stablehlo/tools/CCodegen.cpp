@@ -73,7 +73,13 @@ std::string CCodeGenerator::generateFunctionSignature(func::FuncOp funcOp) {
   // Return type - always void since results are passed as output parameters
   oss << "void";
   
-  oss << " " << funcOp.getName().str() << "(";
+  // Avoid conflict with C's main function
+  std::string funcName = funcOp.getName().str();
+  if (funcName == "main") {
+    funcName = "stablehlo_main";
+  }
+  
+  oss << " " << funcName << "(";
   
   // Input parameters
   bool first = true;
