@@ -296,83 +296,116 @@ struct ConvertFuncForSyscallsPattern : public OpConversionPattern<func::FuncOp> 
   }
 };
 
-// Pass to convert function signatures from tensor to memref types
-// This is needed because OneShotBufferizePass doesn't convert function signatures
-// We only convert INPUT arguments (for syscalls), not return types
-//
-// TOMBSTONE: Failed approach - Initially tried using populateFunctionOpInterfaceTypeConversionPattern
-// which converts both inputs AND outputs. This caused:
-// 1. Return type mismatches (function signature had memref, return had tensor)
-// 2. Complex materialization chains that couldn't be reconciled
-// SOLUTION: Custom pattern (ConvertFuncForSyscallsPattern) that only converts inputs
-// and explicitly converts returns to void
-//
-// TOMBSTONE: Failed approach - Tried to mark stablehlo::CustomCallOp as legal to preserve
-// through the pipeline. This failed because:
-// 1. Bufferization couldn't handle custom_call operations (they weren't bufferized)
-// 2. LLVM conversion doesn't know how to handle stablehlo.custom_call
-// SOLUTION: Convert custom_call to func.call (see Step 2.6) so they become regular
-// function calls that are preserved through the pipeline
+// Custom pass to convert function signatures from tensor to memref types
+// This directly modifies function signatures without using the conversion framework
+// After bufferization, function bodies use memrefs but signatures still have tensors
+// This pass fixes that mismatch by directly converting signatures
 struct ConvertFunctionSignaturesPass
     : public PassWrapper<ConvertFunctionSignaturesPass, OperationPass<ModuleOp>> {
   void runOnOperation() override {
     auto module = getOperation();
     MLIRContext *context = &getContext();
     
-    TensorToMemRefTypeConverter converter;
-    ConversionTarget target(*context);
+    // Helper to convert tensor type to memref type
+    auto convertTensorToMemRef = [](mlir::Type type) -> mlir::Type {
+      if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
+        return MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+      }
+      if (auto tensorType = dyn_cast<UnrankedTensorType>(type)) {
+        return UnrankedMemRefType::get(tensorType.getElementType(), 0);
+      }
+      return type; // Not a tensor, return as-is
+    };
     
-    // Mark func.func as illegal if it has tensor types in inputs OR returns
-    // We convert both inputs and returns to memref (memref is LLVM-convertible)
-    target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
-      auto funcType = op.getFunctionType();
-      // Check input types - must be memref (not tensor)
-      for (mlir::Type inputType : funcType.getInputs()) {
-        if (isa<TensorType>(inputType))
-          return false;
-      }
-      // Check return types - must be memref (not tensor)
-      for (mlir::Type returnType : funcType.getResults()) {
-        if (isa<TensorType>(returnType))
-          return false;
-      }
-      return true;
+    // Walk all functions and convert their signatures
+    SmallVector<func::FuncOp> funcs;
+    module->walk([&](func::FuncOp funcOp) {
+      funcs.push_back(funcOp);
     });
     
-    // func.return is illegal if it has tensor operands (will be converted to memref)
-    target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
-      for (auto operand : op.getOperands()) {
-        if (isa<TensorType>(operand.getType()))
-          return false;
+    for (auto funcOp : funcs) {
+      auto funcType = funcOp.getFunctionType();
+      bool needsConversion = false;
+      
+      // Check if conversion is needed
+      for (auto inputType : funcType.getInputs()) {
+        if (isa<TensorType>(inputType)) {
+          needsConversion = true;
+          break;
+        }
       }
-      return true;
-    });
-    
-    // custom_call operations are already converted to func.call in Step 1.5
-    // All other operations are legal
-    target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
-    
-    RewritePatternSet patterns(context);
-    // Use custom pattern that converts both inputs and returns from tensor to memref
-    patterns.add<ConvertFuncForSyscallsPattern>(converter, context);
-    
-    // Add pattern for return operations to handle type conversion
-    populateReturnOpTypeConversionPattern(patterns, converter);
-    
-    // Use applyFullConversion to ensure all operations are converted
-    if (failed(applyFullConversion(module, target, std::move(patterns)))) {
-      signalPassFailure();
-      return;
-    }
-    
-    // Cleanup unrealized conversion casts (if any, created during conversion)
-    SmallVector<UnrealizedConversionCastOp> casts;
-    module->walk([&](UnrealizedConversionCastOp op) { 
-      casts.push_back(op); 
-    });
-    if (!casts.empty()) {
-      // Reconcile the casts - this should eliminate them if possible
-      mlir::reconcileUnrealizedCasts(casts);
+      if (!needsConversion) {
+        for (auto returnType : funcType.getResults()) {
+          if (isa<TensorType>(returnType)) {
+            needsConversion = true;
+            break;
+          }
+        }
+      }
+      
+      if (!needsConversion) {
+        continue; // Already converted
+      }
+      
+      // Convert input types
+      SmallVector<mlir::Type> newInputTypes;
+      for (auto inputType : funcType.getInputs()) {
+        newInputTypes.push_back(convertTensorToMemRef(inputType));
+      }
+      
+      // Convert return types
+      SmallVector<mlir::Type> newReturnTypes;
+      for (auto returnType : funcType.getResults()) {
+        newReturnTypes.push_back(convertTensorToMemRef(returnType));
+      }
+      
+      // Create new function type
+      auto newFuncType = mlir::FunctionType::get(context, newInputTypes, newReturnTypes);
+      
+      // Use SymbolTable to properly replace the function
+      SymbolTable symbolTable(module);
+      
+      // Create new function with converted signature
+      OpBuilder builder(funcOp);
+      auto newFunc = func::FuncOp::create(
+          builder, funcOp.getLoc(), funcOp.getName(), newFuncType,
+          funcOp.getSymVisibilityAttr(), funcOp.getArgAttrsAttr(), funcOp.getResAttrsAttr());
+      
+      // Move function body
+      newFunc.getBody().takeBody(funcOp.getBody());
+      
+      // Update entry block arguments to match new input types
+      Block *entryBlock = &newFunc.getBody().front();
+      for (unsigned i = 0; i < newInputTypes.size() && i < entryBlock->getNumArguments(); ++i) {
+        entryBlock->getArgument(i).setType(newInputTypes[i]);
+      }
+      
+      // Update return operations - after bufferization, return values should already be memrefs
+      newFunc.walk([&](func::ReturnOp returnOp) {
+        // After bufferization, return operands should already be memrefs
+        // If they're tensors (from to_tensor ops), we need to eliminate those
+        SmallVector<mlir::Value> newOperands;
+        for (unsigned i = 0; i < returnOp.getNumOperands(); ++i) {
+          auto operand = returnOp.getOperand(i);
+          
+          // If operand is from to_tensor, get the underlying memref
+          if (auto toTensorOp = operand.getDefiningOp<bufferization::ToTensorOp>()) {
+            operand = toTensorOp->getOperand(0);
+          }
+          
+          newOperands.push_back(operand);
+        }
+        
+        // Create new return with correct operands
+        OpBuilder returnBuilder(returnOp);
+        returnBuilder.create<func::ReturnOp>(returnOp.getLoc(), newOperands);
+        returnOp.erase();
+      });
+      
+      // Replace old function with new one using SymbolTable
+      // First insert the new function, then erase the old one
+      symbolTable.insert(newFunc);
+      funcOp.erase();
     }
   }
 };
