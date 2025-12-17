@@ -39,6 +39,50 @@ namespace CharUtils {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || 
            (c >= '0' && c <= '9') || c == '_';
   }
+  bool is_unicode_identifier_start(char32_t c) {
+    // Simplified - check if it's a letter or underscore
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+  }
+  bool is_unicode_identifier_continue(char32_t c) {
+    // Simplified - check if it's alphanumeric or underscore
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || 
+           (c >= '0' && c <= '9') || c == '_';
+  }
+}
+
+// Global functions (not in namespace)
+bool is_unicode_identifier_start(char32_t c) {
+  return CharUtils::is_unicode_identifier_start(c);
+}
+
+bool is_unicode_identifier_continue(char32_t c) {
+  return CharUtils::is_unicode_identifier_continue(c);
+}
+
+// Character classification functions
+bool is_digit(char32_t c) {
+  return c >= '0' && c <= '9';
+}
+
+bool is_hex_digit(char32_t c) {
+  return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+bool is_binary_digit(char32_t c) {
+  return c == '0' || c == '1';
+}
+
+bool is_underscore(char32_t c) {
+  return c == '_';
+}
+
+bool is_whitespace(char32_t c) {
+  return c == ' ' || c == '\t' || c == '\n' || c == '\r' || 
+         c == 0x00A0 || c == 0x1680 || c == 0x2000 || c == 0x2001 ||
+         c == 0x2002 || c == 0x2003 || c == 0x2004 || c == 0x2005 ||
+         c == 0x2006 || c == 0x2007 || c == 0x2008 || c == 0x2009 ||
+         c == 0x200A || c == 0x2028 || c == 0x2029 || c == 0x202F ||
+         c == 0x205F || c == 0x3000;
 }
 
 #ifdef DEBUG_ENABLED
@@ -176,7 +220,7 @@ const char *GDScriptTokenizer::Token::get_name() const {
 String GDScriptTokenizer::Token::get_debug_name() const {
 	switch (type) {
 		case IDENTIFIER:
-			return String("identifier \"") + source + "\"";
+			return String("identifier \"") + string_to_cstr(source) + "\"";
 		default:
 			return vformat(R"("%s")", get_name());
 	}
@@ -367,7 +411,7 @@ GDScriptTokenizer::Token GDScriptTokenizerText::make_token(Token::Type p_type) {
 	token.end_line = line;
 	token.start_column = start_column;
 	token.end_column = column;
-	token.source = String::utf32(Span(_start, _current - _start));
+	token.source = String::utf32(Span<const char32_t>(_start, _current - _start));
 
 	if (p_type != Token::ERROR && cursor_line > -1) {
 		// Also count whitespace after token.
@@ -450,7 +494,7 @@ GDScriptTokenizer::Token GDScriptTokenizerText::make_paren_error(char32_t p_pare
 	if (paren_stack.is_empty()) {
 		return make_error(vformat("Closing \"%c\" doesn't have an opening counterpart.", p_paren));
 	}
-	Token error = make_error(vformat("Closing \"%c\" doesn't match the opening \"%c\".", p_paren, paren_stack.back()->get()));
+	Token error = make_error(vformat("Closing \"%c\" doesn't match the opening \"%c\".", p_paren, paren_stack.back()));
 	paren_stack.pop_back(); // Remove opening one anyway.
 	return error;
 }
@@ -589,7 +633,7 @@ GDScriptTokenizer::Token GDScriptTokenizerText::potential_identifier() {
 		return token;
 	}
 
-	String name = String::utf32(Span(_start, len));
+	String name = String::utf32(Span<const char32_t>(_start, len));
 	if (len < MIN_KEYWORD_LENGTH || len > MAX_KEYWORD_LENGTH) {
 		// Cannot be a keyword, as the length doesn't match any.
 		return make_identifier(name);
@@ -604,7 +648,7 @@ GDScriptTokenizer::Token GDScriptTokenizerText::potential_identifier() {
 		if (TS->has_feature(TextServer::FEATURE_UNICODE_SECURITY)) {
 			int64_t confusable = TS->is_confusable(name, keyword_list);
 			if (confusable >= 0) {
-				push_error(vformat(R"(Identifier "%s" is visually similar to the GDScript keyword "%s" and thus not allowed.)", name, keyword_list[confusable]));
+				push_error(vformat(R"(Identifier "%s" is visually similar to the GDScript keyword "%s" and thus not allowed.)", string_to_cstr(name), string_to_cstr(keyword_list[confusable])));
 			}
 		}
 #endif // DEBUG_ENABLED
@@ -839,7 +883,7 @@ GDScriptTokenizer::Token GDScriptTokenizerText::number() {
 
 	// Create a string with the whole number.
 	int len = _current - _start;
-	String number = String::utf32(Span(_start, len)).remove_char('_');
+	String number = String::utf32(Span<const char32_t>(_start, len)).remove_char('_');
 
 	// Convert to the appropriate literal type.
 	if (base == 16) {
@@ -1249,7 +1293,7 @@ void GDScriptTokenizerText::check_indent() {
 			indent_char = current_indent_char;
 		} else if (current_indent_char != indent_char) {
 			Token error = make_error(vformat("Used %s character for indentation instead of %s as used before in the file.",
-					_get_indent_char_name(current_indent_char), _get_indent_char_name(indent_char)));
+					string_to_cstr(_get_indent_char_name(current_indent_char)), string_to_cstr(_get_indent_char_name(indent_char))));
 			error.start_line = line;
 			error.start_column = 1;
 			push_error(error);

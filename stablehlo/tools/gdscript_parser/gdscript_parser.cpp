@@ -679,7 +679,7 @@ void GDScriptParser::end_statement(const String &p_context) {
 		found = true;
 	}
 	if (!found && !is_at_end()) {
-		push_error(vformat(R"(Expected end of statement after %s, found "%s" instead.)", p_context, current.get_name()));
+		push_error(vformat(R"(Expected end of statement after %s, found "%s" instead.)", string_to_cstr(p_context), current.get_name()));
 	}
 }
 
@@ -1034,7 +1034,7 @@ void GDScriptParser::parse_class_member(T *(GDScriptParser::*p_parse_function)(b
 			annotations.push_front(last_annotation);
 			annotation_stack.pop_back();
 		} else {
-			push_error(vformat(R"(Annotation "%s" cannot be applied to a %s.)", last_annotation->name, p_member_kind));
+			push_error(vformat(R"(Annotation "%s" cannot be applied to a %s.)", string_to_cstr(String(last_annotation->name)), string_to_cstr(p_member_kind)));
 			clear_unused_annotations();
 		}
 	}
@@ -1083,7 +1083,7 @@ void GDScriptParser::parse_class_member(T *(GDScriptParser::*p_parse_function)(b
 	if (member->identifier != nullptr) {
 		if (!((String)member->identifier->name).is_empty()) { // Enums may be unnamed.
 			if (current_class->members_indices.has(member->identifier->name)) {
-				push_error(vformat(R"(%s "%s" has the same name as a previously declared %s.)", p_member_kind.capitalize(), member->identifier->name, current_class->get_member(member->identifier->name).get_type_name()), member->identifier);
+				push_error(vformat(R"(%s "%s" has the same name as a previously declared %s.)", string_to_cstr(p_member_kind.capitalize()), string_to_cstr(String(member->identifier->name)), string_to_cstr(current_class->get_member(member->identifier->name).get_type_name())), member->identifier);
 			} else {
 				current_class->add_member(member);
 			}
@@ -1191,7 +1191,7 @@ void GDScriptParser::parse_class_body(bool p_is_multiline) {
 				} else if (previous.get_identifier() == "mastersync") {
 					push_error(R"(The "mastersync" keyword was removed in Godot 4. Use the "@rpc" annotation with "any_peer" and "call_local", and perform a check inside the function instead.)");
 				} else {
-					push_error(vformat(R"(Unexpected %s in class body.)", previous.get_debug_name()));
+					push_error(vformat(R"(Unexpected %s in class body.)", string_to_cstr(previous.get_debug_name())));
 				}
 				break;
 		}
@@ -1597,10 +1597,10 @@ GDScriptParser::EnumNode *GDScriptParser::parse_enum(bool p_is_static) {
 			item.end_column = previous.end_column;
 
 			if (elements.has(item.identifier->name)) {
-				push_error(vformat(R"(Name "%s" was already in this enum (at line %d).)", item.identifier->name, elements[item.identifier->name]), item.identifier);
+				push_error(vformat(R"(Name "%s" was already in this enum (at line %d).)", string_to_cstr(String(item.identifier->name)), elements[item.identifier->name]), item.identifier);
 			} else if (!named) {
 				if (current_class->members_indices.has(item.identifier->name)) {
-					push_error(vformat(R"(Name "%s" is already used as a class %s.)", item.identifier->name, current_class->get_member(item.identifier->name).get_type_name()));
+					push_error(vformat(R"(Name "%s" is already used as a class %s.)", string_to_cstr(String(item.identifier->name)), string_to_cstr(current_class->get_member(item.identifier->name).get_type_name())));
 				}
 			}
 
@@ -1696,7 +1696,7 @@ bool GDScriptParser::parse_function_signature(FunctionNode *p_function, SuiteNod
 			}
 
 			if (p_function->parameters_indices.has(parameter->identifier->name)) {
-				push_error(vformat(R"(Parameter with name "%s" was already declared for this %s.)", parameter->identifier->name, p_type));
+				push_error(vformat(R"(Parameter with name "%s" was already declared for this %s.)", string_to_cstr(String(parameter->identifier->name)), string_to_cstr(p_type)));
 			} else if (is_rest) {
 				p_function->rest_parameter = parameter;
 				p_body->add_local(parameter, current_function);
@@ -1819,7 +1819,7 @@ GDScriptParser::AnnotationNode *GDScriptParser::parse_annotation(uint32_t p_vali
 		} else if (annotation->name == "@tutorial") {
 			push_error(R"("@tutorial" annotation does not exist. Use "## @tutorial(Title): https://example.com" instead.)");
 		} else {
-			push_error(vformat(R"(Unrecognized annotation: "%s".)", annotation->name));
+			push_error(vformat(R"(Unrecognized annotation: "%s".)", string_to_cstr(String(annotation->name))));
 		}
 		valid = false;
 	}
@@ -1831,7 +1831,7 @@ GDScriptParser::AnnotationNode *GDScriptParser::parse_annotation(uint32_t p_vali
 			if (annotation->applies_to(AnnotationInfo::SCRIPT)) {
 				push_error(vformat(R"(Annotation "%s" must be at the top of the script, before "extends" and "class_name".)", annotation->name));
 			} else {
-				push_error(vformat(R"(Annotation "%s" is not allowed in this level.)", annotation->name));
+				push_error(vformat(R"(Annotation "%s" is not allowed in this level.)", string_to_cstr(String(annotation->name))));
 			}
 			valid = false;
 		}
@@ -1884,14 +1884,14 @@ GDScriptParser::AnnotationNode *GDScriptParser::parse_annotation(uint32_t p_vali
 
 void GDScriptParser::clear_unused_annotations() {
 	for (const AnnotationNode *annotation : annotation_stack) {
-		push_error(vformat(R"(Annotation "%s" does not precede a valid target, so it will have no effect.)", annotation->name), annotation);
+		push_error(vformat(R"(Annotation "%s" does not precede a valid target, so it will have no effect.)", string_to_cstr(String(annotation->name))), annotation);
 	}
 
 	annotation_stack.clear();
 }
 
 bool GDScriptParser::register_annotation(const MethodInfo &p_info, uint32_t p_target_kinds, AnnotationAction p_apply, const Vector<Variant> &p_default_arguments, bool p_is_vararg) {
-	ERR_FAIL_COND_V_MSG(valid_annotations.has(p_info.name), false, vformat(R"(Annotation "%s" already registered.)", p_info.name));
+	ERR_FAIL_COND_V_MSG(valid_annotations.has(p_info.name), false, vformat(R"(Annotation "%s" already registered.)", string_to_cstr(String(p_info.name))));
 
 	AnnotationInfo new_annotation;
 	new_annotation.info = p_info;
@@ -1924,7 +1924,7 @@ GDScriptParser::SuiteNode *GDScriptParser::parse_suite(const String &p_context, 
 	}
 
 	if (multiline) {
-		if (!consume(GDScriptTokenizer::Token::INDENT, vformat(R"(Expected indented block after %s.)", p_context))) {
+		if (!consume(GDScriptTokenizer::Token::INDENT, vformat(R"(Expected indented block after %s.)", string_to_cstr(p_context)))) {
 			current_suite = suite->parent_block;
 			complete_extents(suite);
 			return suite;
@@ -1954,7 +1954,7 @@ GDScriptParser::SuiteNode *GDScriptParser::parse_suite(const String &p_context, 
 				VariableNode *variable = static_cast<VariableNode *>(statement);
 				const SuiteNode::Local &local = current_suite->get_local(variable->identifier->name);
 				if (local.type != SuiteNode::Local::UNDEFINED) {
-					push_error(vformat(R"(There is already a %s named "%s" declared in this scope.)", local.get_name(), variable->identifier->name), variable->identifier);
+					push_error(vformat(R"(There is already a %s named "%s" declared in this scope.)", string_to_cstr(local.get_name()), string_to_cstr(String(variable->identifier->name))), variable->identifier);
 				}
 				current_suite->add_local(variable, current_function);
 				break;
@@ -1984,13 +1984,13 @@ GDScriptParser::SuiteNode *GDScriptParser::parse_suite(const String &p_context, 
 
 	if (multiline) {
 		if (!lambda_ended) {
-			consume(GDScriptTokenizer::Token::DEDENT, vformat(R"(Missing unindent at the end of %s.)", p_context));
+			consume(GDScriptTokenizer::Token::DEDENT, vformat(R"(Missing unindent at the end of %s.)", string_to_cstr(p_context)));
 
 		} else {
 			match(GDScriptTokenizer::Token::DEDENT);
 		}
 	} else if (previous.type == GDScriptTokenizer::Token::SEMICOLON) {
-		consume(GDScriptTokenizer::Token::NEWLINE, vformat(R"(Expected newline after ";" at the end of %s.)", p_context));
+		consume(GDScriptTokenizer::Token::NEWLINE, vformat(R"(Expected newline after ";" at the end of %s.)", string_to_cstr(p_context)));
 	}
 
 	if (p_for_lambda) {
@@ -2014,7 +2014,7 @@ GDScriptParser::Node *GDScriptParser::parse_statement() {
 				annotations.push_front(last_annotation);
 				annotation_stack.pop_back();
 			} else {
-				push_error(vformat(R"(Annotation "%s" cannot be applied to a statement.)", last_annotation->name));
+				push_error(vformat(R"(Annotation "%s" cannot be applied to a statement.)", string_to_cstr(String(last_annotation->name))));
 				clear_unused_annotations();
 			}
 		}
@@ -2121,7 +2121,7 @@ GDScriptParser::Node *GDScriptParser::parse_statement() {
 					has_ended_lambda = true;
 				} else {
 					advance();
-					push_error(vformat(R"(Expected statement, found "%s" instead.)", previous.get_name()));
+					push_error(vformat(R"(Expected statement, found "%s" instead.)", string_to_cstr(previous.get_name())));
 				}
 			} else {
 				end_statement("expression");
@@ -2316,7 +2316,7 @@ GDScriptParser::ForNode *GDScriptParser::parse_for() {
 	if (n_for->variable) {
 		const SuiteNode::Local &local = current_suite->get_local(n_for->variable->name);
 		if (local.type != SuiteNode::Local::UNDEFINED) {
-			push_error(vformat(R"(There is already a %s named "%s" declared in this scope.)", local.get_name(), n_for->variable->name), n_for->variable);
+			push_error(vformat(R"(There is already a %s named "%s" declared in this scope.)", string_to_cstr(local.get_name()), string_to_cstr(String(n_for->variable->name))), n_for->variable);
 		}
 		suite->add_local(SuiteNode::Local(n_for->variable, current_function));
 	}
@@ -2336,12 +2336,12 @@ GDScriptParser::IfNode *GDScriptParser::parse_if(const String &p_token) {
 
 	n_if->condition = parse_expression(false);
 	if (n_if->condition == nullptr) {
-		push_error(vformat(R"(Expected conditional expression after "%s".)", p_token));
+		push_error(vformat(R"(Expected conditional expression after "%s".)", string_to_cstr(p_token)));
 	}
 
-	consume(GDScriptTokenizer::Token::COLON, vformat(R"(Expected ":" after "%s" condition.)", p_token));
+	consume(GDScriptTokenizer::Token::COLON, vformat(R"(Expected ":" after "%s" condition.)", string_to_cstr(p_token)));
 
-	n_if->true_block = parse_suite(vformat(R"("%s" block)", p_token));
+	n_if->true_block = parse_suite(vformat(R"("%s" block)", string_to_cstr(p_token)));
 	n_if->true_block->parent_if = n_if;
 
 	if (n_if->true_block->has_continue) {
@@ -2411,7 +2411,7 @@ GDScriptParser::MatchNode *GDScriptParser::parse_match() {
 				continue;
 			}
 			if (annotation->name != SNAME("@warning_ignore")) {
-				push_error(vformat(R"(Annotation "%s" is not allowed in this level.)", annotation->name), annotation);
+				push_error(vformat(R"(Annotation "%s" is not allowed in this level.)", string_to_cstr(String(annotation->name))), annotation);
 				continue;
 			}
 			match_branch_annotation_stack.push_back(annotation);
@@ -2448,7 +2448,7 @@ GDScriptParser::MatchNode *GDScriptParser::parse_match() {
 	}
 
 	for (const AnnotationNode *annotation : match_branch_annotation_stack) {
-		push_error(vformat(R"(Annotation "%s" does not precede a valid target, so it will have no effect.)", annotation->name), annotation);
+		push_error(vformat(R"(Annotation "%s" does not precede a valid target, so it will have no effect.)", string_to_cstr(String(annotation->name))), annotation);
 	}
 	match_branch_annotation_stack.clear();
 
@@ -2568,7 +2568,7 @@ GDScriptParser::PatternNode *GDScriptParser::parse_match_pattern(PatternNode *p_
 			}
 
 			if (current_suite->has_local(pattern->bind->name)) {
-				push_error(vformat(R"(There's already a %s named "%s" in this scope.)", current_suite->get_local(pattern->bind->name).get_name(), pattern->bind->name));
+				push_error(vformat(R"(There's already a %s named "%s" in this scope.)", string_to_cstr(current_suite->get_local(pattern->bind->name).get_name()), string_to_cstr(String(pattern->bind->name))));
 				complete_extents(pattern);
 				return nullptr;
 			}
@@ -3551,13 +3551,13 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_get_node(ExpressionNode *p
 	make_completion_context(COMPLETION_GET_NODE, nullptr, -1);
 
 	if (!current.is_node_name() && !check(GDScriptTokenizer::Token::LITERAL) && !check(GDScriptTokenizer::Token::SLASH) && !check(GDScriptTokenizer::Token::PERCENT)) {
-		push_error(vformat(R"(Expected node path as string or identifier after "%s".)", previous.get_name()));
+		push_error(vformat(R"(Expected node path as string or identifier after "%s".)", string_to_cstr(previous.get_name())));
 		return nullptr;
 	}
 
 	if (check(GDScriptTokenizer::Token::LITERAL)) {
 		if (current.literal.get_type() != Variant::STRING) {
-			push_error(vformat(R"(Expected node path as string or identifier after "%s".)", previous.get_name()));
+			push_error(vformat(R"(Expected node path as string or identifier after "%s".)", string_to_cstr(previous.get_name())));
 			return nullptr;
 		}
 	}
@@ -3623,7 +3623,7 @@ GDScriptParser::ExpressionNode *GDScriptParser::parse_get_node(ExpressionNode *p
 					default:
 						break;
 				}
-				push_error(vformat(R"(Expected node path as string or identifier after "%s".)", previous_token));
+				push_error(vformat(R"(Expected node path as string or identifier after "%s".)", string_to_cstr(String(previous_token))));
 				complete_extents(get_node);
 				return nullptr;
 			}
@@ -4365,7 +4365,7 @@ bool GDScriptParser::validate_annotation_arguments(AnnotationNode *p_annotation)
 	const MethodInfo &info = valid_annotations[p_annotation->name].info;
 
 	if (((info.flags & METHOD_FLAG_VARARG) == 0) && p_annotation->arguments.size() > info.arguments.size()) {
-		push_error(vformat(R"(Annotation "%s" requires at most %d arguments, but %d were given.)", p_annotation->name, info.arguments.size(), p_annotation->arguments.size()));
+		push_error(vformat(R"(Annotation "%s" requires at most %d arguments, but %d were given.)", string_to_cstr(String(p_annotation->name)), info.arguments.size(), p_annotation->arguments.size()));
 		return false;
 	}
 
@@ -4380,14 +4380,14 @@ bool GDScriptParser::validate_annotation_arguments(AnnotationNode *p_annotation)
 			ExpressionNode *argument = p_annotation->arguments[i];
 
 			if (argument->type != Node::LITERAL) {
-				push_error(vformat(R"(Argument %d of annotation "%s" must be a string literal.)", i + 1, p_annotation->name), argument);
+				push_error(vformat(R"(Argument %d of annotation "%s" must be a string literal.)", i + 1, string_to_cstr(String(p_annotation->name))), argument);
 				return false;
 			}
 
 			Variant value = static_cast<LiteralNode *>(argument)->value;
 
 			if (value.get_type() != Variant::STRING) {
-				push_error(vformat(R"(Argument %d of annotation "%s" must be a string literal.)", i + 1, p_annotation->name), argument);
+				push_error(vformat(R"(Argument %d of annotation "%s" must be a string literal.)", i + 1, string_to_cstr(String(p_annotation->name))), argument);
 				return false;
 			}
 
@@ -4446,7 +4446,7 @@ bool GDScriptParser::static_unload_annotation(AnnotationNode *p_annotation, Node
 	ERR_FAIL_COND_V_MSG(p_target->type != Node::CLASS, false, vformat(R"("%s" annotation can only be applied to classes.)", p_annotation->name));
 	ClassNode *class_node = static_cast<ClassNode *>(p_target);
 	if (class_node->annotated_static_unload) {
-		push_error(vformat(R"("%s" annotation can only be used once per script.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"("%s" annotation can only be used once per script.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 	class_node->annotated_static_unload = true;
@@ -4551,7 +4551,7 @@ static String _get_annotation_error_string(const StringName &p_annotation_name, 
 		string += ", or " + types[types.size() - 1].quote();
 	}
 
-	return vformat(R"("%s" annotation requires a variable of type %s, but type "%s" was given instead.)", p_annotation_name, string, p_provided_type.to_string());
+	return vformat(R"("%s" annotation requires a variable of type %s, but type "%s" was given instead.)", string_to_cstr(p_annotation_name), string_to_cstr(string), string_to_cstr(p_provided_type.to_string()));
 }
 
 static StringName _find_narrowest_native_or_global_class(const GDScriptParser::DataType &p_type) {
@@ -4614,16 +4614,16 @@ static StringName _find_narrowest_native_or_global_class(const GDScriptParser::D
 
 template <PropertyHint t_hint, Variant::Type t_type>
 bool GDScriptParser::export_annotations(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
-	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", p_annotation->name));
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", string_to_cstr(String(p_annotation->name))));
 	ERR_FAIL_NULL_V(p_class, false);
 
 	VariableNode *variable = static_cast<VariableNode *>(p_target);
 	if (variable->is_static) {
-		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 	if (variable->exported) {
-		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 
@@ -4638,11 +4638,11 @@ bool GDScriptParser::export_annotations(AnnotationNode *p_annotation, Node *p_ta
 
 		if (p_annotation->name != SNAME("@export_placeholder")) {
 			if (arg_string.is_empty()) {
-				push_error(vformat(R"(Argument %d of annotation "%s" is empty.)", i + 1, p_annotation->name), p_annotation->arguments[i]);
+				push_error(vformat(R"(Argument %d of annotation "%s" is empty.)", i + 1, string_to_cstr(String(p_annotation->name))), p_annotation->arguments[i]);
 				return false;
 			}
 			if (arg_string.contains_char(',')) {
-				push_error(vformat(R"(Argument %d of annotation "%s" contains a comma. Use separate arguments instead.)", i + 1, p_annotation->name), p_annotation->arguments[i]);
+				push_error(vformat(R"(Argument %d of annotation "%s" contains a comma. Use separate arguments instead.)", i + 1, string_to_cstr(String(p_annotation->name))), p_annotation->arguments[i]);
 				return false;
 			}
 		}
@@ -4682,7 +4682,7 @@ bool GDScriptParser::export_annotations(AnnotationNode *p_annotation, Node *p_ta
 				push_error(vformat(R"(Invalid argument %d of annotation "@export_node_path": The class "%s" was not found in the global scope.)", i + 1, arg_string), p_annotation->arguments[i]);
 				return false;
 			} else if (!ClassDB::is_parent_class(native_class, SNAME("Node"))) {
-				push_error(vformat(R"(Invalid argument %d of annotation "@export_node_path": The class "%s" does not inherit "Node".)", i + 1, arg_string), p_annotation->arguments[i]);
+				push_error(vformat(R"(Invalid argument %d of annotation "@export_node_path": The class "%s" does not inherit "Node".)", i + 1, string_to_cstr(arg_string)), p_annotation->arguments[i]);
 				return false;
 			}
 		}
@@ -4815,7 +4815,7 @@ bool GDScriptParser::export_annotations(AnnotationNode *p_annotation, Node *p_ta
 		}
 
 		if (variable->export_info.hint == PROPERTY_HINT_NODE_TYPE && !ClassDB::is_parent_class(p_class->base_type.native_type, SNAME("Node"))) {
-			push_error(vformat(R"(Node export is only supported in Node-derived classes, but the current class inherits "%s".)", p_class->base_type.to_string()), p_annotation);
+			push_error(vformat(R"(Node export is only supported in Node-derived classes, but the current class inherits "%s".)", string_to_cstr(p_class->base_type.to_string())), p_annotation);
 			return false;
 		}
 
@@ -4886,7 +4886,7 @@ bool GDScriptParser::export_annotations(AnnotationNode *p_annotation, Node *p_ta
 			}
 
 			if (variable->export_info.hint == PROPERTY_HINT_NODE_TYPE && !ClassDB::is_parent_class(p_class->base_type.native_type, SNAME("Node"))) {
-				push_error(vformat(R"(Node export is only supported in Node-derived classes, but the current class inherits "%s".)", p_class->base_type.to_string()), p_annotation);
+				push_error(vformat(R"(Node export is only supported in Node-derived classes, but the current class inherits "%s".)", string_to_cstr(p_class->base_type.to_string())), p_annotation);
 				return false;
 			}
 
@@ -4951,15 +4951,15 @@ bool GDScriptParser::export_annotations(AnnotationNode *p_annotation, Node *p_ta
 // or handle array exports in a special way, so they are implemented as separate methods.
 
 bool GDScriptParser::export_storage_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
-	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", p_annotation->name));
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", string_to_cstr(String(p_annotation->name))));
 
 	VariableNode *variable = static_cast<VariableNode *>(p_target);
 	if (variable->is_static) {
-		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 	if (variable->exported) {
-		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 
@@ -4973,16 +4973,16 @@ bool GDScriptParser::export_storage_annotation(AnnotationNode *p_annotation, Nod
 }
 
 bool GDScriptParser::export_custom_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
-	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", p_annotation->name));
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", string_to_cstr(String(p_annotation->name))));
 	ERR_FAIL_COND_V_MSG(p_annotation->resolved_arguments.size() < 2, false, R"(Annotation "@export_custom" requires 2 arguments.)");
 
 	VariableNode *variable = static_cast<VariableNode *>(p_target);
 	if (variable->is_static) {
-		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 	if (variable->exported) {
-		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 
@@ -5002,7 +5002,7 @@ bool GDScriptParser::export_custom_annotation(AnnotationNode *p_annotation, Node
 
 bool GDScriptParser::export_tool_button_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
 #ifdef TOOLS_ENABLED
-	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", p_annotation->name));
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::VARIABLE, false, vformat(R"("%s" annotation can only be applied to variables.)", string_to_cstr(String(p_annotation->name))));
 	ERR_FAIL_COND_V(p_annotation->resolved_arguments.is_empty(), false);
 
 	if (!is_tool()) {
@@ -5013,18 +5013,18 @@ bool GDScriptParser::export_tool_button_annotation(AnnotationNode *p_annotation,
 	VariableNode *variable = static_cast<VariableNode *>(p_target);
 
 	if (variable->is_static) {
-		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be applied to a static variable.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 	if (variable->exported) {
-		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", p_annotation->name), p_annotation);
+		push_error(vformat(R"(Annotation "%s" cannot be used with another "@export" annotation.)", string_to_cstr(String(p_annotation->name))), p_annotation);
 		return false;
 	}
 
 	const DataType variable_type = variable->get_datatype();
 	if (!variable_type.is_variant() && variable_type.is_hard_type()) {
 		if (variable_type.kind != DataType::BUILTIN || variable_type.builtin_type != Variant::CALLABLE) {
-			push_error(vformat(R"("@export_tool_button" annotation requires a variable of type "Callable", but type "%s" was given instead.)", variable_type.to_string()), p_annotation);
+			push_error(vformat(R"("@export_tool_button" annotation requires a variable of type "Callable", but type "%s" was given instead.)", string_to_cstr(variable_type.to_string())), p_annotation);
 			return false;
 		}
 	}
@@ -5081,7 +5081,7 @@ bool GDScriptParser::warning_ignore_annotation(AnnotationNode *p_annotation, Nod
 	for (const Variant &warning_name : p_annotation->resolved_arguments) {
 		GDScriptWarning::Code warning_code = GDScriptWarning::get_code_from_name(String(warning_name).to_upper());
 		if (warning_code == GDScriptWarning::WARNING_MAX) {
-			push_error(vformat(R"(Invalid warning name: "%s".)", warning_name), p_annotation);
+			push_error(vformat(R"(Invalid warning name: "%s".)", string_to_cstr(String(warning_name))), p_annotation);
 			has_error = true;
 		} else {
 			int start_line = p_annotation->start_line;
@@ -5159,20 +5159,20 @@ bool GDScriptParser::warning_ignore_region_annotations(AnnotationNode *p_annotat
 	for (const Variant &warning_name : p_annotation->resolved_arguments) {
 		GDScriptWarning::Code warning_code = GDScriptWarning::get_code_from_name(String(warning_name).to_upper());
 		if (warning_code == GDScriptWarning::WARNING_MAX) {
-			push_error(vformat(R"(Invalid warning name: "%s".)", warning_name), p_annotation);
+			push_error(vformat(R"(Invalid warning name: "%s".)", string_to_cstr(String(warning_name))), p_annotation);
 			has_error = true;
 			continue;
 		}
 		if (is_start) {
 			if (warning_ignore_start_lines[warning_code] != INT_MAX) {
-				push_error(vformat(R"(Warning "%s" is already being ignored by "@warning_ignore_start" at line %d.)", String(warning_name).to_upper(), warning_ignore_start_lines[warning_code]), p_annotation);
+				push_error(vformat(R"(Warning "%s" is already being ignored by "@warning_ignore_start" at line %d.)", string_to_cstr(String(warning_name).to_upper()), warning_ignore_start_lines[warning_code]), p_annotation);
 				has_error = true;
 				continue;
 			}
 			warning_ignore_start_lines[warning_code] = p_annotation->start_line;
 		} else {
 			if (warning_ignore_start_lines[warning_code] == INT_MAX) {
-				push_error(vformat(R"(Warning "%s" is not being ignored by "@warning_ignore_start".)", String(warning_name).to_upper()), p_annotation);
+				push_error(vformat(R"(Warning "%s" is not being ignored by "@warning_ignore_start".)", string_to_cstr(String(warning_name).to_upper())), p_annotation);
 				has_error = true;
 				continue;
 			}
@@ -5192,7 +5192,7 @@ bool GDScriptParser::warning_ignore_region_annotations(AnnotationNode *p_annotat
 }
 
 bool GDScriptParser::rpc_annotation(AnnotationNode *p_annotation, Node *p_target, ClassNode *p_class) {
-	ERR_FAIL_COND_V_MSG(p_target->type != Node::FUNCTION, false, vformat(R"("%s" annotation can only be applied to functions.)", p_annotation->name));
+	ERR_FAIL_COND_V_MSG(p_target->type != Node::FUNCTION, false, vformat(R"("%s" annotation can only be applied to functions.)", string_to_cstr(String(p_annotation->name))));
 
 	FunctionNode *function = static_cast<FunctionNode *>(p_target);
 	if (function->rpc_config.get_type() != Variant::NIL) {
@@ -5297,10 +5297,10 @@ String GDScriptParser::DataType::to_string() const {
 				return "null";
 			}
 			if (builtin_type == Variant::ARRAY && has_container_element_type(0)) {
-				return vformat("Array[%s]", get_container_element_type(0).to_string());
+				return vformat("Array[%s]", string_to_cstr(get_container_element_type(0).to_string()));
 			}
 			if (builtin_type == Variant::DICTIONARY && has_container_element_types()) {
-				return vformat("Dictionary[%s, %s]", get_container_element_type_or_variant(0).to_string(), get_container_element_type_or_variant(1).to_string());
+				return vformat("Dictionary[%s, %s]", string_to_cstr(get_container_element_type_or_variant(0).to_string()), string_to_cstr(get_container_element_type_or_variant(1).to_string()));
 			}
 			return Variant::get_type_name(builtin_type);
 		case NATIVE:
@@ -5560,7 +5560,7 @@ bool GDScriptParser::DataType::can_reference(const GDScriptParser::DataType &p_o
 	if (kind == GDScriptParser::DataType::CLASS && script.is_null()) {
 		Error err = OK;
 		Ref<GDScript> scr = GDScriptCache::get_shallow_script(script_path, err);
-		ERR_FAIL_COND_V_MSG(err, false, vformat(R"(Error while getting cache for script "%s".)", script_path));
+		ERR_FAIL_COND_V_MSG(err, false, vformat(R"(Error while getting cache for script "%s".)", string_to_cstr(script_path)));
 		script.reference_ptr(scr->find_class(class_type->fqcn));
 	}
 
@@ -5568,7 +5568,7 @@ bool GDScriptParser::DataType::can_reference(const GDScriptParser::DataType &p_o
 	if (p_other.kind == GDScriptParser::DataType::CLASS && script_other.is_null()) {
 		Error err = OK;
 		Ref<GDScript> scr = GDScriptCache::get_shallow_script(p_other.script_path, err);
-		ERR_FAIL_COND_V_MSG(err, false, vformat(R"(Error while getting cache for script "%s".)", p_other.script_path));
+		ERR_FAIL_COND_V_MSG(err, false, vformat(R"(Error while getting cache for script "%s".)", string_to_cstr(p_other.script_path)));
 		script_other.reference_ptr(scr->find_class(p_other.class_type->fqcn));
 	}
 
@@ -5862,7 +5862,7 @@ void GDScriptParser::TreePrinter::print_class(ClassNode *p_class) {
 		bool first = true;
 		push_text(" Extends ");
 		if (!p_class->extends_path.is_empty()) {
-			push_text(vformat(R"("%s")", p_class->extends_path));
+			push_text(vformat(R"("%s")", string_to_cstr(p_class->extends_path)));
 			first = false;
 		}
 		for (int i = 0; i < p_class->extends.size(); i++) {

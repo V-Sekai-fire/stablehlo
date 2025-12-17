@@ -32,6 +32,7 @@
 
 // #include "gdscript.h"  // Not needed for standalone parser
 #include "godot_core_adapters.h"
+#include <unordered_set>
 
 // #include "core/object/ref_counted.h"
 // #include "core/os/safe_binary_mutex.h"
