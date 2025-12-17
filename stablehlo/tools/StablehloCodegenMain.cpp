@@ -454,75 +454,243 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
   // signatures (tensors) and function bodies (memrefs after linalg conversion)
   pm.addPass(std::make_unique<ConvertFunctionSignaturesPass>());
 
-  // TEMP: Return early to test our pass without bufferization
-  return success();
-
-  // TEMPORARILY DISABLE BUFFERIZATION TO TEST OUR PASS
-  /*
-  // Step 2: Bufferize operations (convert tensors to memrefs)
-  // Custom bufferization pass that immediately eliminates to_tensor/to_buffer operations
-  // For RISC-V CPU target, bufferization converts tensors to memrefs
+  // Step 2: Custom Phased Bufferization Strategy
+  // OPTION C: Custom bufferization that preserves function signature consistency
+  // This approach runs bufferization in phases with signature updates in between
   {
-    struct CustomBufferizePass : public PassWrapper<CustomBufferizePass, OperationPass<ModuleOp>> {
+    struct PhasedBufferizePass : public PassWrapper<PhasedBufferizePass, OperationPass<ModuleOp>> {
       void runOnOperation() override {
         auto module = getOperation();
         MLIRContext *context = &getContext();
-        
-        // Run the standard OneShotBufferizePass
-        mlir::PassManager nestedPM(context);
-        nestedPM.addPass(bufferization::createOneShotBufferizePass());
-        
-        if (failed(nestedPM.run(module))) {
-          signalPassFailure();
-          return;
-        }
-        
-        // Immediately after bufferization, eliminate any to_tensor/to_buffer operations
-        // This prevents them from causing issues later in the pipeline
-        struct EliminateToTensorPattern : public OpRewritePattern<bufferization::ToTensorOp> {
-          using OpRewritePattern::OpRewritePattern;
-          LogicalResult matchAndRewrite(bufferization::ToTensorOp op,
-                                        PatternRewriter &rewriter) const override {
-            rewriter.replaceOp(op, op->getOperand(0));
-            return success();
-          }
-        };
-        struct EliminateToBufferPattern : public OpRewritePattern<bufferization::ToBufferOp> {
-          using OpRewritePattern::OpRewritePattern;
-          LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
-                                       PatternRewriter &rewriter) const override {
-            if (auto toTensor = op.getTensor().getDefiningOp<bufferization::ToTensorOp>()) {
-              rewriter.replaceOp(op, toTensor->getOperand(0));
-            } else {
-              rewriter.replaceOp(op, op.getTensor());
+
+        // Phase 1: Analyze function signatures and prepare for bufferization
+        // Convert any remaining tensor signatures to memref before bufferization
+        {
+          // Helper to convert tensor type to memref type
+          auto convertTensorToMemRef = [](mlir::Type type) -> mlir::Type {
+            if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
+              return MemRefType::get(tensorType.getShape(), tensorType.getElementType());
             }
-            return success();
+            if (auto tensorType = dyn_cast<UnrankedTensorType>(type)) {
+              return UnrankedMemRefType::get(tensorType.getElementType(), 0);
+            }
+            return type; // Not a tensor, return as-is
+          };
+
+          // Pre-bufferization signature conversion
+          module.walk([&](func::FuncOp funcOp) {
+            auto funcType = funcOp.getFunctionType();
+            bool needsConversion = false;
+
+            // Check if conversion is needed
+            for (auto inputType : funcType.getInputs()) {
+              if (isa<TensorType>(inputType)) {
+                needsConversion = true;
+                break;
+              }
+            }
+            if (!needsConversion) {
+              for (auto returnType : funcType.getResults()) {
+                if (isa<TensorType>(returnType)) {
+                  needsConversion = true;
+                  break;
+                }
+              }
+            }
+
+            if (needsConversion) {
+              // Convert input types
+              SmallVector<mlir::Type> newInputTypes;
+              for (auto inputType : funcType.getInputs()) {
+                newInputTypes.push_back(convertTensorToMemRef(inputType));
+              }
+
+              // Convert return types
+              SmallVector<mlir::Type> newReturnTypes;
+              for (auto returnType : funcType.getResults()) {
+                newReturnTypes.push_back(convertTensorToMemRef(returnType));
+              }
+
+              // Update entry block arguments to match new input types
+              Block *entryBlock = &funcOp.getBody().front();
+              for (unsigned i = 0; i < newInputTypes.size() && i < entryBlock->getNumArguments(); ++i) {
+                auto arg = entryBlock->getArgument(i);
+                auto newType = newInputTypes[i];
+                if (arg.getType() != newType) {
+                  arg.setType(newType);
+                }
+              }
+
+              // Update function signature
+              auto newFuncType = mlir::FunctionType::get(context, newInputTypes, newReturnTypes);
+              funcOp.setFunctionType(newFuncType);
+            }
+          });
+        }
+
+        // Phase 2: Run bufferization with function signatures already converted
+        // Use OneShotBufferizePass but with relaxed requirements since signatures are consistent
+        {
+          mlir::PassManager bufferizePM(context);
+          // Configure bufferization to be more permissive with function signatures
+          bufferization::OneShotBufferizationOptions options;
+          options.functionBoundaryTypeConversion = bufferization::BufferizationOptions::LayoutMapOption::IdentityLayoutMap;
+          options.allowUnknownOps = true;  // Allow operations we haven't specifically handled
+          bufferizePM.addPass(bufferization::createOneShotBufferizePass(options));
+
+          if (failed(bufferizePM.run(module))) {
+            // If standard bufferization fails, try a more conservative approach
+            llvm::errs() << "Standard bufferization failed, trying conservative approach\n";
+
+            // Conservative approach: only bufferize operations that are clearly safe
+            RewritePatternSet conservativePatterns(context);
+
+            // Pattern to bufferize simple tensor operations
+            struct ConservativeBufferizePattern : public OpRewritePattern<linalg::GenericOp> {
+              using OpRewritePattern::OpRewritePattern;
+
+              LogicalResult matchAndRewrite(linalg::GenericOp op,
+                                          PatternRewriter &rewriter) const override {
+                // Only bufferize if all operands are tensors and we're in a function with memref signature
+                bool allTensors = true;
+                for (auto operand : op.getOperands()) {
+                  if (!isa<TensorType>(operand.getType())) {
+                    allTensors = false;
+                    break;
+                  }
+                }
+
+                if (!allTensors) return failure();
+
+                // Check if we're in a function context
+                auto funcOp = op->getParentOfType<func::FuncOp>();
+                if (!funcOp) return failure();
+
+                // Allocate output buffers
+                SmallVector<Value> newOperands = op.getOperands();
+                SmallVector<Type> newResultTypes;
+
+                for (auto resultType : op.getResultTypes()) {
+                  if (auto tensorType = dyn_cast<RankedTensorType>(resultType)) {
+                    auto memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
+                    auto alloc = rewriter.create<memref::AllocOp>(op.getLoc(), memrefType);
+                    newOperands.push_back(alloc);
+                    newResultTypes.push_back(memrefType);
+                  }
+                }
+
+                if (newOperands.size() == op.getOperands().size()) {
+                  return failure(); // No outputs were bufferized
+                }
+
+                // Create new linalg.generic with mixed operands
+                auto newOp = rewriter.create<linalg::GenericOp>(
+                  op.getLoc(),
+                  newResultTypes,
+                  newOperands.take_front(op.getOperands().size()),
+                  newOperands.drop_front(op.getOperands().size()),
+                  op.getIndexingMaps(),
+                  op.getIteratorTypes(),
+                  op.getBody()->clone(),
+                  op.getAttributes()
+                );
+
+                // Replace original operation
+                for (unsigned i = 0; i < op.getNumResults(); ++i) {
+                  op.getResult(i).replaceAllUsesWith(newOp.getResult(i));
+                }
+                rewriter.eraseOp(op);
+
+                return success();
+              }
+            };
+
+            conservativePatterns.add<ConservativeBufferizePattern>(context);
+
+            GreedyRewriteConfig config;
+            config.maxIterations = 1; // Single pass to avoid infinite loops
+
+            if (failed(applyPatternsAndFoldGreedily(module, std::move(conservativePatterns), config))) {
+              signalPassFailure();
+              return;
+            }
           }
-        };
-        
-        // Run multiple iterations to ensure all are eliminated
-        for (int i = 0; i < 5; ++i) {
-          RewritePatternSet patterns(context);
-          patterns.add<EliminateToTensorPattern>(context, /*benefit=*/10);
-          patterns.add<EliminateToBufferPattern>(context, /*benefit=*/5);
-          
+        }
+
+        // Phase 3: Post-bufferization cleanup and signature reconciliation
+        // Eliminate bufferization artifacts and ensure signature consistency
+        {
+          // Pattern to eliminate to_tensor operations
+          struct EliminateToTensorPattern : public OpRewritePattern<bufferization::ToTensorOp> {
+            using OpRewritePattern::OpRewritePattern;
+            LogicalResult matchAndRewrite(bufferization::ToTensorOp op,
+                                        PatternRewriter &rewriter) const override {
+              // Replace to_tensor with its memref operand
+              rewriter.replaceOp(op, op.getMemref());
+              return success();
+            }
+          };
+
+          // Pattern to eliminate to_buffer operations
+          struct EliminateToBufferPattern : public OpRewritePattern<bufferization::ToBufferOp> {
+            using OpRewritePattern::OpRewritePattern;
+            LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
+                                        PatternRewriter &rewriter) const override {
+              // Replace to_buffer with its tensor operand (if it's a simple tensor)
+              // This is a conservative approach - only eliminate if safe
+              auto tensorOperand = op.getTensor();
+              if (tensorOperand.getType().isa<TensorType>()) {
+                rewriter.replaceOp(op, tensorOperand);
+                return success();
+              }
+              return failure();
+            }
+          };
+
+          // Run cleanup patterns
+          RewritePatternSet cleanupPatterns(context);
+          cleanupPatterns.add<EliminateToTensorPattern>(context, /*benefit=*/10);
+          cleanupPatterns.add<EliminateToBufferPattern>(context, /*benefit=*/5);
+
           GreedyRewriteConfig config;
-          auto frozenPatterns = mlir::FrozenRewritePatternSet(std::move(patterns));
-          if (failed(applyPatternsGreedily(module, frozenPatterns, config))) {
-            signalPassFailure();
-            return;
+          config.maxIterations = 3;
+
+          for (int iteration = 0; iteration < 3; ++iteration) {
+            auto frozenPatterns = mlir::FrozenRewritePatternSet(cleanupPatterns);
+            if (failed(applyPatternsGreedily(module, frozenPatterns, config))) {
+              break; // Stop if patterns fail
+            }
+
+            // Check if any bufferization ops remain
+            bool foundAny = false;
+            module.walk([&](bufferization::ToTensorOp op) { foundAny = true; });
+            module.walk([&](bufferization::ToBufferOp op) { foundAny = true; });
+            if (!foundAny) break;
           }
-          
-          // Check if any remain
-          bool foundAny = false;
-          module.walk([&](bufferization::ToTensorOp op) { foundAny = true; });
-          module.walk([&](bufferization::ToBufferOp op) { foundAny = true; });
-          if (!foundAny) break;
+
+          // Final signature reconciliation
+          module.walk([&](func::FuncOp funcOp) {
+            auto funcType = funcOp.getFunctionType();
+
+            // Check if return types need updating based on actual return operations
+            SmallVector<mlir::Type> actualReturnTypes;
+            funcOp.walk([&](func::ReturnOp returnOp) {
+              for (auto operand : returnOp.getOperands()) {
+                actualReturnTypes.push_back(operand.getType());
+              }
+            });
+
+            if (!actualReturnTypes.empty() && actualReturnTypes != funcType.getResults()) {
+              // Update function signature to match actual return types
+              auto newFuncType = mlir::FunctionType::get(context, funcType.getInputs(), actualReturnTypes);
+              funcOp.setFunctionType(newFuncType);
+            }
+          });
         }
       }
     };
-    
-    pm.addPass(std::make_unique<CustomBufferizePass>());
+
+    pm.addPass(std::make_unique<PhasedBufferizePass>());
   }
   
   // TOMBSTONE: Failed approach - Tried to convert stablehlo.custom_call to func.call
