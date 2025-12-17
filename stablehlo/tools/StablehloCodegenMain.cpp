@@ -448,6 +448,11 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
   // Step 1: Convert StableHLO to Linalg
   pm.addPass(mlir::stablehlo::createStablehloLegalizeToLinalgPass());
 
+  // Step 1.5: Convert function signatures from tensor to memref types BEFORE bufferization
+  // This prevents bufferization from failing due to type mismatches between function
+  // signatures (tensors) and function bodies (memrefs after linalg conversion)
+  pm.addPass(std::make_unique<ConvertFunctionSignaturesPass>());
+
   // Step 2: Bufferize operations (convert tensors to memrefs)
   // Custom bufferization pass that immediately eliminates to_tensor/to_buffer operations
   // For RISC-V CPU target, bufferization converts tensors to memrefs
@@ -521,11 +526,6 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
   // 3. Type mismatches: "expected operand type 'memref<...>', but provided 'tensor<...>'"
   // SOLUTION: Convert custom_call AFTER bufferization and function signature conversion
   // (see Step 2.6 below) so types are already memref
-  
-  // Step 2.5: Convert function signatures from tensor to memref types
-  // OneShotBufferizePass doesn't convert function signatures by default
-  // This is needed for CPU codegen where func.func must have memref types
-  pm.addPass(std::make_unique<ConvertFunctionSignaturesPass>());
   
   // Step 3: Convert Linalg to loops
   pm.addPass(createConvertLinalgToLoopsPass());
