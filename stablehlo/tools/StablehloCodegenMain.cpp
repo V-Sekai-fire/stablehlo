@@ -75,6 +75,7 @@ limitations under the License.
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/IR/PatternMatch.h"
 #include "stablehlo/conversions/linalg/transforms/Passes.h"
 #include "stablehlo/dialect/Register.h"
 #include "stablehlo/dialect/StablehloOps.h"
@@ -147,15 +148,17 @@ public:
                                 ValueRange values, Location loc) -> mlir::Value {
       if (values.size() != 1)
         return {};
-      if (auto memrefType = dyn_cast<MemRefType>(values[0].getType())) {
-        if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
-          if (memrefType.getShape() == tensorType.getShape() &&
-              memrefType.getElementType() == tensorType.getElementType()) {
-            // Use bufferization.to_tensor to convert memref to tensor
-            return builder.create<bufferization::ToTensorOp>(
-                loc, tensorType, values[0]);
-          }
-        }
+      auto valueType = values[0].getType();
+      auto memrefType = dyn_cast<MemRefType>(valueType);
+      if (!memrefType)
+        return {};
+      auto tensorType = dyn_cast<RankedTensorType>(type);
+      if (!tensorType)
+        return {};
+      if (memrefType.getShape() == tensorType.getShape() &&
+          memrefType.getElementType() == tensorType.getElementType()) {
+        // Use bufferization.to_tensor to convert memref to tensor
+        return bufferization::ToTensorOp::create(builder, loc, tensorType, values[0]);
       }
       return {};
     });
@@ -202,16 +205,8 @@ public:
   }
 };
 
-// Custom pattern to convert function inputs to memref and remove tensor returns
-// Since we only need syscalls (inputs), we convert to void return
-//
-// TOMBSTONE: Failed approach - Initially tried to preserve tensor return types
-// and only convert inputs. This failed because:
-// 1. createConvertFuncToLLVMPass() requires all function types to be LLVM-convertible
-// 2. LLVMTypeConverter cannot handle tensor types
-// 3. Functions with tensor returns couldn't be converted to llvm.func
-// SOLUTION: Convert returns to void (empty return type) - the computation still happens,
-// we just don't return the tensor value. This allows all functions to be converted to LLVM.
+// Custom pattern to convert function inputs and returns from tensor to memref
+// Memref types are LLVM-convertible (become pointers), unlike tensor types
 struct ConvertFuncForSyscallsPattern : public OpConversionPattern<func::FuncOp> {
   ConvertFuncForSyscallsPattern(TypeConverter &converter, MLIRContext *context)
       : OpConversionPattern(converter, context) {}
@@ -227,17 +222,18 @@ struct ConvertFuncForSyscallsPattern : public OpConversionPattern<func::FuncOp> 
     if (failed(converter->convertTypes(funcType.getInputs(), convertedInputTypes)))
       return failure();
     
-    // Remove return types - convert to void return since we only need syscalls
-    // The computation still happens, we just don't return the tensor
-    SmallVector<mlir::Type> voidReturns; // Empty = void return
+    // Convert return types to memref (memref is LLVM-convertible, tensor is not)
+    SmallVector<mlir::Type> convertedReturnTypes;
+    if (failed(converter->convertTypes(funcType.getResults(), convertedReturnTypes)))
+      return failure();
     
-    // Create new function type with converted inputs and void return
-    auto newFuncType = rewriter.getFunctionType(convertedInputTypes, voidReturns);
+    // Create new function type with converted inputs and returns
+    auto newFuncType = rewriter.getFunctionType(convertedInputTypes, convertedReturnTypes);
     
     // Create new function with converted signature
     auto newFunc = func::FuncOp::create(
         rewriter, op.getLoc(), op.getName(), newFuncType,
-        op.getSymVisibilityAttr(), op.getArgAttrsAttr(), ArrayAttr()); // No result attrs
+        op.getSymVisibilityAttr(), op.getArgAttrsAttr(), op.getResAttrsAttr());
     
     // Move function body
     rewriter.inlineRegionBefore(op.getBody(), newFunc.getBody(), newFunc.end());
@@ -253,10 +249,46 @@ struct ConvertFuncForSyscallsPattern : public OpConversionPattern<func::FuncOp> 
                                            &signatureConversion)))
       return failure();
     
-    // Replace all return operations with void returns (discard tensor returns)
+    // Convert return operations - convert tensor return values to memref
+    // After bufferization, return values might be tensors (from to_tensor ops),
+    // but the function signature expects memrefs
+    // We need to eliminate to_tensor operations and use the underlying memref directly
     newFunc.walk([&](func::ReturnOp returnOp) {
       rewriter.setInsertionPoint(returnOp);
-      rewriter.replaceOpWithNewOp<func::ReturnOp>(returnOp);
+      SmallVector<mlir::Value> convertedReturns;
+      for (unsigned i = 0; i < returnOp.getNumOperands(); ++i) {
+        auto operand = returnOp.getOperand(i);
+        auto expectedType = convertedReturnTypes[i];
+        
+        // If operand is a tensor from to_tensor, get the underlying memref
+        // ToTensorOp takes a memref and returns a tensor, so we get operand 0
+        if (auto toTensorOp = operand.getDefiningOp<bufferization::ToTensorOp>()) {
+          // Use the memref directly instead of converting tensor back to memref
+          operand = toTensorOp->getOperand(0);
+        }
+        
+        // If the operand type doesn't match the expected type, we need to handle it
+        // After memref finalization, operands may be LLVM structs but expected type is memref
+        // In that case, we should use the operand directly (memref finalization will handle it)
+        // Otherwise, materialize conversion
+        if (operand.getType() != expectedType) {
+          // If operand is already an LLVM struct but expected is memref, this will be handled
+          // by memref finalization - just use the operand directly
+          // The materialization will create a cast, but that's handled by finalization
+          auto materialized = converter->materializeTargetConversion(
+              rewriter, returnOp.getLoc(), expectedType, operand);
+          if (materialized) {
+            convertedReturns.push_back(materialized);
+          } else {
+            // If materialization fails, use the operand as-is
+            // This can happen after memref finalization when types are LLVM structs
+            convertedReturns.push_back(operand);
+          }
+        } else {
+          convertedReturns.push_back(operand);
+        }
+      }
+      rewriter.replaceOpWithNewOp<func::ReturnOp>(returnOp, convertedReturns);
     });
     
     rewriter.replaceOp(op, newFunc);
@@ -291,7 +323,7 @@ struct ConvertFunctionSignaturesPass
     ConversionTarget target(*context);
     
     // Mark func.func as illegal if it has tensor types in inputs OR returns
-    // We convert inputs to memref and remove returns (void return)
+    // We convert both inputs and returns to memref (memref is LLVM-convertible)
     target.addDynamicallyLegalOp<func::FuncOp>([&](func::FuncOp op) {
       auto funcType = op.getFunctionType();
       // Check input types - must be memref (not tensor)
@@ -299,22 +331,33 @@ struct ConvertFunctionSignaturesPass
         if (isa<TensorType>(inputType))
           return false;
       }
-      // Check return types - must be void (no tensor returns)
-      if (!funcType.getResults().empty())
-        return false;
+      // Check return types - must be memref (not tensor)
+      for (mlir::Type returnType : funcType.getResults()) {
+        if (isa<TensorType>(returnType))
+          return false;
+      }
       return true;
     });
     
-    // func.return is legal (will be converted to void returns)
-    target.addLegalOp<func::ReturnOp>();
+    // func.return is illegal if it has tensor operands (will be converted to memref)
+    target.addDynamicallyLegalOp<func::ReturnOp>([&](func::ReturnOp op) {
+      for (auto operand : op.getOperands()) {
+        if (isa<TensorType>(operand.getType()))
+          return false;
+      }
+      return true;
+    });
     
     // custom_call operations are already converted to func.call in Step 1.5
     // All other operations are legal
     target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
     
     RewritePatternSet patterns(context);
-    // Use custom pattern that converts inputs and removes tensor returns (void return)
+    // Use custom pattern that converts both inputs and returns from tensor to memref
     patterns.add<ConvertFuncForSyscallsPattern>(converter, context);
+    
+    // Add pattern for return operations to handle type conversion
+    populateReturnOpTypeConversionPattern(patterns, converter);
     
     // Use applyFullConversion to ensure all operations are converted
     if (failed(applyFullConversion(module, target, std::move(patterns)))) {
@@ -344,6 +387,14 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
 
   // Step 2: Bufferize operations (convert tensors to memrefs)
   // For RISC-V CPU target, bufferization converts tensors to memrefs
+  // TOMBSTONE: Attempted to disable bufferization to avoid to_tensor/to_buffer operations
+  // This failed because:
+  // 1. Linalg operations still produce tensors, not memrefs
+  // 2. We need memrefs for LLVM codegen (tensors aren't LLVM-convertible)
+  // 3. Manual conversion would require rewriting all operations
+  // SOLUTION: Keep bufferization but eliminate to_tensor/to_buffer operations before memref finalization
+  // Note: We can't fully disable bufferization - it's required to convert tensors to memrefs
+  // The to_tensor/to_buffer operations are created by our materialization functions, not by bufferization itself
   pm.addPass(bufferization::createOneShotBufferizePass());
   
   // TOMBSTONE: Failed approach - Tried to convert stablehlo.custom_call to func.call
@@ -367,14 +418,199 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
 
   // Step 5: Lower Affine operations
   pm.addPass(createLowerAffinePass());
+  
+  // Step 5.5: Eliminate ALL bufferization operations (to_tensor, to_buffer) before memref finalization
+  // CRITICAL ORDER: This MUST happen BEFORE Step 6 (memref finalization)
+  // After memref finalization, memrefs become LLVM structs, but to_tensor/to_buffer
+  // still expect memrefs, creating unrealized conversion casts that can't be reconciled.
+  // Solution: Eliminate ALL to_tensor/to_buffer operations before finalization
+  // Order of elimination: to_buffer first (identity chains), then standalone to_tensor
+  {
+    // Pattern 1: Eliminate to_buffer that takes input from to_tensor (identity chain)
+    struct EliminateToBufferPattern : public OpRewritePattern<bufferization::ToBufferOp> {
+      using OpRewritePattern::OpRewritePattern;
+      LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
+                                     PatternRewriter &rewriter) const override {
+        // If the input is from to_tensor, we can eliminate both
+        if (auto toTensor = op.getTensor().getDefiningOp<bufferization::ToTensorOp>()) {
+          // Replace to_buffer with the original memref from to_tensor
+          rewriter.replaceOp(op, toTensor->getOperand(0));
+          return success();
+        }
+        return failure();
+      }
+    };
+    
+    // Pattern 2: Eliminate ALL to_tensor operations (replace with underlying memref)
+    // This handles all cases: direct memref, unrealized casts, or any other case
+    // CRITICAL: We must eliminate ALL to_tensor operations before memref finalization
+    struct EliminateToTensorPattern : public OpRewritePattern<bufferization::ToTensorOp> {
+      using OpRewritePattern::OpRewritePattern;
+      LogicalResult matchAndRewrite(bufferization::ToTensorOp op,
+                                      PatternRewriter &rewriter) const override {
+        auto operand = op->getOperand(0);
+        
+        // Always replace to_tensor with its operand, regardless of type
+        // This eliminates the tensor intermediate - the operand (memref or cast) will be handled by later passes
+        rewriter.replaceOp(op, operand);
+        return success();
+      }
+    };
+    
+    RewritePatternSet patterns(module.getContext());
+    // Add to_buffer pattern first (higher priority - eliminates identity chains)
+    patterns.add<EliminateToBufferPattern>(module.getContext(), /*benefit=*/10);
+    // Add to_tensor pattern (lower priority - handles standalone cases)
+    patterns.add<EliminateToTensorPattern>(module.getContext(), /*benefit=*/5);
+    
+    GreedyRewriteConfig config;
+    if (failed(applyPatternsGreedily(module, std::move(patterns), config))) {
+      return module.emitError("Failed to eliminate bufferization operations");
+    }
+  }
 
   // Step 6: Finalize MemRef to LLVM (must come before Func conversion)
-  // Based on TestLowerToLLVM example: MemRef finalization comes before Func
-  pm.addPass(createFinalizeMemRefToLLVMConversionPass());
+  // Custom pass that finalizes memrefs AND converts function signatures
+  // The standard pass doesn't convert function return types, causing materialization casts
+  {
+    struct FinalizeMemRefToLLVMPass
+        : public PassWrapper<FinalizeMemRefToLLVMPass, OperationPass<ModuleOp>> {
+      void runOnOperation() override {
+        auto module = getOperation();
+        MLIRContext *context = &getContext();
+        
+        // First, run the standard memref finalization pass
+        mlir::PassManager nestedPM(context);
+        nestedPM.addPass(createFinalizeMemRefToLLVMConversionPass());
+        if (failed(nestedPM.run(module))) {
+          signalPassFailure();
+          return;
+        }
+        
+        // Then, manually convert function return types from memref to LLVM struct
+        // This is needed because the standard pass doesn't convert function signatures
+        mlir::LLVMTypeConverter typeConverter(context);
+        module->walk([&](func::FuncOp funcOp) {
+          auto funcType = funcOp.getFunctionType();
+          SmallVector<mlir::Type> newInputTypes;
+          SmallVector<mlir::Type> newReturnTypes;
+          
+          // Convert input types (should already be LLVM types after finalization)
+          for (auto inputType : funcType.getInputs()) {
+            newInputTypes.push_back(inputType);
+          }
+          
+          // Convert return types from memref to LLVM struct
+          for (auto returnType : funcType.getResults()) {
+            if (auto memrefType = dyn_cast<MemRefType>(returnType)) {
+              // Convert memref to LLVM struct using LLVMTypeConverter
+              auto convertedType = typeConverter.convertType(memrefType);
+              if (convertedType) {
+                newReturnTypes.push_back(convertedType);
+              } else {
+                // If conversion fails, keep the memref type (shouldn't happen)
+                newReturnTypes.push_back(returnType);
+              }
+            } else {
+              // Not a memref, keep as-is
+              newReturnTypes.push_back(returnType);
+            }
+          }
+          
+          // Update function signature if return types changed
+          if (newReturnTypes != funcType.getResults()) {
+            auto newFuncType = mlir::FunctionType::get(context, newInputTypes, newReturnTypes);
+            funcOp.setType(newFuncType);
+            
+            // Also update return operations to convert memref values to LLVM structs
+            // After finalization, return values should be LLVM structs, but if they're still
+            // memrefs, we need to convert them using the type converter
+            funcOp.walk([&](func::ReturnOp returnOp) {
+              SmallVector<mlir::Value> newReturns;
+              OpBuilder builder(returnOp);
+              for (unsigned i = 0; i < returnOp.getNumOperands(); ++i) {
+                auto operand = returnOp.getOperand(i);
+                auto expectedType = newReturnTypes[i];
+                
+                if (operand.getType() != expectedType) {
+                  // The operand is still a memref, but we need an LLVM struct
+                  // Use the type converter to convert it
+                  auto convertedType = typeConverter.convertType(operand.getType());
+                  if (convertedType == expectedType) {
+                    // Type converter can convert this type - use materialization
+                    auto materialized = typeConverter.materializeTargetConversion(
+                        builder, returnOp.getLoc(), expectedType, operand);
+                    if (materialized) {
+                      newReturns.push_back(materialized);
+                    } else {
+                      // If materialization fails, add a cast (shouldn't happen)
+                      auto cast = UnrealizedConversionCastOp::create(builder,
+                          returnOp.getLoc(), expectedType, operand);
+                      newReturns.push_back(cast.getResult(0));
+                    }
+                  } else {
+                    // Type converter can't convert - add a cast
+                    auto cast = UnrealizedConversionCastOp::create(builder,
+                        returnOp.getLoc(), expectedType, operand);
+                    newReturns.push_back(cast.getResult(0));
+                  }
+                } else {
+                  newReturns.push_back(operand);
+                }
+              }
+              func::ReturnOp::create(builder, returnOp.getLoc(), newReturns);
+              returnOp.erase();
+            });
+          }
+        });
+      }
+    };
+    
+    pm.addPass(std::make_unique<FinalizeMemRefToLLVMPass>());
+  }
+  
+  // Step 6.5: Eliminate any remaining bufferization operations AFTER memref finalization
+  // Materialization functions may create to_tensor operations after finalization
+  // These must be eliminated before Func conversion
+  {
+    struct EliminateAllToTensorPattern : public OpRewritePattern<bufferization::ToTensorOp> {
+      using OpRewritePattern::OpRewritePattern;
+      LogicalResult matchAndRewrite(bufferization::ToTensorOp op,
+                                      PatternRewriter &rewriter) const override {
+        // Always replace to_tensor with its operand - eliminate all to_tensor operations
+        rewriter.replaceOp(op, op->getOperand(0));
+        return success();
+      }
+    };
+    
+    struct EliminateAllToBufferPattern : public OpRewritePattern<bufferization::ToBufferOp> {
+      using OpRewritePattern::OpRewritePattern;
+      LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
+                                     PatternRewriter &rewriter) const override {
+        // If input is from to_tensor, eliminate both; otherwise just eliminate to_buffer
+        if (auto toTensor = op.getTensor().getDefiningOp<bufferization::ToTensorOp>()) {
+          rewriter.replaceOp(op, toTensor->getOperand(0));
+        } else {
+          // Can't eliminate to_buffer without to_tensor - this shouldn't happen after finalization
+          return failure();
+        }
+        return success();
+      }
+    };
+    
+    RewritePatternSet patterns(module.getContext());
+    patterns.add<EliminateAllToTensorPattern>(module.getContext(), /*benefit=*/10);
+    patterns.add<EliminateAllToBufferPattern>(module.getContext(), /*benefit=*/5);
+    
+    GreedyRewriteConfig config;
+    if (failed(applyPatternsGreedily(module, std::move(patterns), config))) {
+      return module.emitError("Failed to eliminate bufferization operations after memref finalization");
+    }
+  }
   
   // Step 7: Convert to LLVM dialect
   // Order based on TestLowerToLLVM example:
-  // 1. Func to LLVM (all functions now have void returns, so all can be converted)
+  // 1. Func to LLVM (all functions now have memref returns, which are LLVM-convertible)
   // 2. Arith to LLVM
   // 3. ControlFlow to LLVM
   pm.addPass(createConvertFuncToLLVMPass());
@@ -452,11 +688,34 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
     finalCasts.push_back(op); 
   });
   if (!finalCasts.empty()) {
+    llvm::errs() << "Found " << finalCasts.size() << " unrealized conversion casts before reconciliation\n";
+    for (auto cast : finalCasts) {
+      llvm::errs() << "  Cast: ";
+      cast.print(llvm::errs());
+      llvm::errs() << "\n";
+    }
     mlir::reconcileUnrealizedCasts(finalCasts);
+    
+    // Check again after reconciliation
+    SmallVector<UnrealizedConversionCastOp> remainingCasts;
+    module->walk([&](UnrealizedConversionCastOp op) { 
+      remainingCasts.push_back(op); 
+    });
+    if (!remainingCasts.empty()) {
+      llvm::errs() << "WARNING: " << remainingCasts.size() << " unrealized conversion casts remain after reconciliation\n";
+      for (auto cast : remainingCasts) {
+        llvm::errs() << "  Remaining cast: ";
+        cast.print(llvm::errs());
+        llvm::errs() << "\n";
+        cast.emitError() << "Unreconciled conversion cast";
+      }
+      module->print(llvm::errs());
+      return failure();
+    }
   }
 
   // Debug: verify conversion worked - all func.func should be converted to llvm.func
-  // (All functions now have void returns, so they should all be converted)
+  // (All functions now have memref returns, which are LLVM-convertible)
   bool foundFuncOps = false;
   module->walk([&](func::FuncOp op) {
     foundFuncOps = true;
@@ -482,9 +741,29 @@ LogicalResult emitRiscVCode(ModuleOp module, StringRef outputPath,
   // 1. Lost the computation entirely
   // 2. Functions were needed for the module structure
   // 3. translateModuleToLLVMIR still encountered func.func operations
-  // SOLUTION: Convert all functions to have void returns, so no removal needed
+  // SOLUTION: Convert all functions to have memref returns (LLVM-convertible), so no removal needed
   
-  // All functions now have void returns (tensor returns removed), so no need to remove anything
+  // All functions now have memref returns (tensor returns converted to memref), so no need to remove anything
+  
+  // Final check for unrealized conversion casts before LLVM translation
+  SmallVector<UnrealizedConversionCastOp> preTranslationCasts;
+  module.walk([&](UnrealizedConversionCastOp op) { 
+    preTranslationCasts.push_back(op); 
+  });
+  if (!preTranslationCasts.empty()) {
+    llvm::errs() << "ERROR: Found " << preTranslationCasts.size() << " unrealized conversion casts before LLVM translation:\n";
+    for (auto cast : preTranslationCasts) {
+      llvm::errs() << "  Cast at ";
+      cast.getLoc().print(llvm::errs());
+      llvm::errs() << ": ";
+      cast.print(llvm::errs());
+      llvm::errs() << "\n";
+      cast.emitError() << "Unrealized conversion cast that cannot be translated to LLVM";
+    }
+    module.print(llvm::errs());
+    return module.emitError("unrealized conversion casts remain - cannot translate to LLVM IR");
+  }
+  
   // Convert MLIR module to LLVM IR
   llvm::LLVMContext llvmContext;
   auto llvmModule = mlir::translateModuleToLLVMIR(module, llvmContext);
