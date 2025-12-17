@@ -442,6 +442,7 @@ struct ConvertFunctionSignaturesPass
 
 // Lower StableHLO to LLVM IR through a series of passes
 LogicalResult lowerToLLVMIR(ModuleOp module) {
+  llvm::errs() << "Starting StableHLO to LLVM lowering pipeline\n";
   mlir::PassManager pm(module.getContext());
   pm.enableVerifier(true);
 
@@ -453,6 +454,11 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
   // signatures (tensors) and function bodies (memrefs after linalg conversion)
   pm.addPass(std::make_unique<ConvertFunctionSignaturesPass>());
 
+  // TEMP: Return early to test our pass without bufferization
+  return success();
+
+  // TEMPORARILY DISABLE BUFFERIZATION TO TEST OUR PASS
+  /*
   // Step 2: Bufferize operations (convert tensors to memrefs)
   // Custom bufferization pass that immediately eliminates to_tensor/to_buffer operations
   // For RISC-V CPU target, bufferization converts tensors to memrefs
@@ -967,6 +973,7 @@ int main(int argc, char **argv) {
   // Ensure LLVM dialect is loaded (needed for conversion passes)
   context.getOrLoadDialect<mlir::LLVM::LLVMDialect>();
 
+  llvm::errs() << "Parsing input file: " << inputFilename << "\n";
   // Parse input file
   OwningOpRef<ModuleOp> module;
   if (inputFilename == "-") {
@@ -988,6 +995,8 @@ int main(int argc, char **argv) {
     errs() << "Error: Could not parse input file\n";
     return 1;
   }
+
+  llvm::errs() << "Successfully parsed input file\n";
 
   // Lower to LLVM IR
   if (failed(lowerToLLVMIR(*module))) {
