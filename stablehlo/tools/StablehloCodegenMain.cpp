@@ -386,16 +386,70 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
   pm.addPass(mlir::stablehlo::createStablehloLegalizeToLinalgPass());
 
   // Step 2: Bufferize operations (convert tensors to memrefs)
+  // Custom bufferization pass that immediately eliminates to_tensor/to_buffer operations
   // For RISC-V CPU target, bufferization converts tensors to memrefs
-  // TOMBSTONE: Attempted to disable bufferization to avoid to_tensor/to_buffer operations
-  // This failed because:
-  // 1. Linalg operations still produce tensors, not memrefs
-  // 2. We need memrefs for LLVM codegen (tensors aren't LLVM-convertible)
-  // 3. Manual conversion would require rewriting all operations
-  // SOLUTION: Keep bufferization but eliminate to_tensor/to_buffer operations before memref finalization
-  // Note: We can't fully disable bufferization - it's required to convert tensors to memrefs
-  // The to_tensor/to_buffer operations are created by our materialization functions, not by bufferization itself
-  pm.addPass(bufferization::createOneShotBufferizePass());
+  {
+    struct CustomBufferizePass : public PassWrapper<CustomBufferizePass, OperationPass<ModuleOp>> {
+      void runOnOperation() override {
+        auto module = getOperation();
+        MLIRContext *context = &getContext();
+        
+        // Run the standard OneShotBufferizePass
+        mlir::PassManager nestedPM(context);
+        nestedPM.addPass(bufferization::createOneShotBufferizePass());
+        
+        if (failed(nestedPM.run(module))) {
+          signalPassFailure();
+          return;
+        }
+        
+        // Immediately after bufferization, eliminate any to_tensor/to_buffer operations
+        // This prevents them from causing issues later in the pipeline
+        struct EliminateToTensorPattern : public OpRewritePattern<bufferization::ToTensorOp> {
+          using OpRewritePattern::OpRewritePattern;
+          LogicalResult matchAndRewrite(bufferization::ToTensorOp op,
+                                        PatternRewriter &rewriter) const override {
+            rewriter.replaceOp(op, op->getOperand(0));
+            return success();
+          }
+        };
+        struct EliminateToBufferPattern : public OpRewritePattern<bufferization::ToBufferOp> {
+          using OpRewritePattern::OpRewritePattern;
+          LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
+                                       PatternRewriter &rewriter) const override {
+            if (auto toTensor = op.getTensor().getDefiningOp<bufferization::ToTensorOp>()) {
+              rewriter.replaceOp(op, toTensor->getOperand(0));
+            } else {
+              rewriter.replaceOp(op, op.getTensor());
+            }
+            return success();
+          }
+        };
+        
+        // Run multiple iterations to ensure all are eliminated
+        for (int i = 0; i < 5; ++i) {
+          RewritePatternSet patterns(context);
+          patterns.add<EliminateToTensorPattern>(context, /*benefit=*/10);
+          patterns.add<EliminateToBufferPattern>(context, /*benefit=*/5);
+          
+          GreedyRewriteConfig config;
+          auto frozenPatterns = mlir::FrozenRewritePatternSet(std::move(patterns));
+          if (failed(applyPatternsGreedily(module, frozenPatterns, config))) {
+            signalPassFailure();
+            return;
+          }
+          
+          // Check if any remain
+          bool foundAny = false;
+          module.walk([&](bufferization::ToTensorOp op) { foundAny = true; });
+          module.walk([&](bufferization::ToBufferOp op) { foundAny = true; });
+          if (!foundAny) break;
+        }
+      }
+    };
+    
+    pm.addPass(std::make_unique<CustomBufferizePass>());
+  }
   
   // TOMBSTONE: Failed approach - Tried to convert stablehlo.custom_call to func.call
   // BEFORE bufferization. This failed because:
