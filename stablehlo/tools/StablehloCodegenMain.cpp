@@ -305,7 +305,7 @@ struct ConvertFunctionSignaturesPass
   void runOnOperation() override {
     auto module = getOperation();
     MLIRContext *context = &getContext();
-    
+
     // Helper to convert tensor type to memref type
     auto convertTensorToMemRef = [](mlir::Type type) -> mlir::Type {
       if (auto tensorType = dyn_cast<RankedTensorType>(type)) {
@@ -316,20 +316,22 @@ struct ConvertFunctionSignaturesPass
       }
       return type; // Not a tensor, return as-is
     };
-    
+
     // Use SymbolTable for proper function replacement
     SymbolTable symbolTable(module);
-    
+
     // Walk all functions and convert their signatures
     SmallVector<func::FuncOp> funcs;
     module->walk([&](func::FuncOp funcOp) {
       funcs.push_back(funcOp);
     });
+
+    llvm::errs() << "ConvertFunctionSignaturesPass: Found " << funcs.size() << " functions\n";
     
     for (auto funcOp : funcs) {
       auto funcType = funcOp.getFunctionType();
       bool needsConversion = false;
-      
+
       // Check if conversion is needed
       for (auto inputType : funcType.getInputs()) {
         if (isa<TensorType>(inputType)) {
@@ -345,7 +347,11 @@ struct ConvertFunctionSignaturesPass
           }
         }
       }
-      
+
+      llvm::errs() << "ConvertFunctionSignaturesPass: Function " << funcOp.getName()
+                   << " - needs conversion: " << (needsConversion ? "YES" : "NO") << "\n";
+      llvm::errs() << "  Original signature: " << funcType << "\n";
+
       if (!needsConversion) {
         continue; // Already converted
       }
@@ -395,7 +401,9 @@ struct ConvertFunctionSignaturesPass
       
       // Update function signature using setFunctionType
       funcOp.setFunctionType(newFuncType);
-      
+
+      llvm::errs() << "  New signature: " << funcOp.getFunctionType() << "\n";
+
       // Update return operations - after bufferization, return values should already be memrefs
       funcOp.walk([&](func::ReturnOp returnOp) {
         SmallVector<mlir::Value> newOperands;
@@ -427,6 +435,8 @@ struct ConvertFunctionSignaturesPass
         }
       });
     }
+
+    llvm::errs() << "ConvertFunctionSignaturesPass: Completed\n";
   }
 };
 
