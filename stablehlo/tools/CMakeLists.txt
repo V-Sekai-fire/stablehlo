@@ -19,6 +19,10 @@ set(LLVM_OPTIONAL_SOURCES
   StablehloOptMain.cpp
   StablehloTranslateMain.cpp
   Interpreter.cpp
+  CCodegen.cpp
+  CTypeConverter.cpp
+  COpEmitters.cpp
+  CIndexUtils.cpp
 )
 
 # stablehlo-opt
@@ -101,6 +105,12 @@ add_dependencies(check-stablehlo-quick stablehlo-lsp-server)
 
 # stablehlo-codegen
 add_llvm_executable(stablehlo-codegen StablehloCodegenMain.cpp)
+target_sources(stablehlo-codegen PRIVATE
+  CCodegen.cpp
+  CTypeConverter.cpp
+  COpEmitters.cpp
+  CIndexUtils.cpp
+)
 llvm_update_compile_flags(stablehlo-codegen)
 get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
 target_link_libraries(stablehlo-codegen PRIVATE

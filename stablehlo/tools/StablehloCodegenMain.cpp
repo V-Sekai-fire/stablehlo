@@ -80,6 +80,8 @@ limitations under the License.
 #include "stablehlo/dialect/Register.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "stablehlo/transforms/Passes.h"
+#include "stablehlo/tools/CCodegen.h"
+#include "stablehlo/tools/COpEmitters.h"
 
 using namespace mlir;
 using namespace llvm;
@@ -119,6 +121,10 @@ static cl::opt<bool> emitLLVM("emit-llvm",
 static cl::opt<bool> emitAsm("emit-asm",
                               cl::desc("Emit assembly instead of binary"),
                               cl::init(false));
+
+static cl::opt<bool> emitC("emit-c",
+                           cl::desc("Emit C99 code instead of binary"),
+                           cl::init(false));
 
 // Type converter that converts tensor types to memref types
 // This is needed because OneShotBufferizePass doesn't convert function signatures
@@ -528,92 +534,15 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
           });
         }
 
-        // Phase 2: Run bufferization with function signatures already converted
-        // Use OneShotBufferizePass but with relaxed requirements since signatures are consistent
+        // Phase 2: Run standard bufferization
+        // Function signatures are already converted to memref, so bufferization should work smoothly
         {
           mlir::PassManager bufferizePM(context);
-          // Configure bufferization to be more permissive with function signatures
-          bufferization::OneShotBufferizationOptions options;
-          options.functionBoundaryTypeConversion = bufferization::BufferizationOptions::LayoutMapOption::IdentityLayoutMap;
-          options.allowUnknownOps = true;  // Allow operations we haven't specifically handled
-          bufferizePM.addPass(bufferization::createOneShotBufferizePass(options));
+          bufferizePM.addPass(bufferization::createOneShotBufferizePass());
 
           if (failed(bufferizePM.run(module))) {
-            // If standard bufferization fails, try a more conservative approach
-            llvm::errs() << "Standard bufferization failed, trying conservative approach\n";
-
-            // Conservative approach: only bufferize operations that are clearly safe
-            RewritePatternSet conservativePatterns(context);
-
-            // Pattern to bufferize simple tensor operations
-            struct ConservativeBufferizePattern : public OpRewritePattern<linalg::GenericOp> {
-              using OpRewritePattern::OpRewritePattern;
-
-              LogicalResult matchAndRewrite(linalg::GenericOp op,
-                                          PatternRewriter &rewriter) const override {
-                // Only bufferize if all operands are tensors and we're in a function with memref signature
-                bool allTensors = true;
-                for (auto operand : op.getOperands()) {
-                  if (!isa<TensorType>(operand.getType())) {
-                    allTensors = false;
-                    break;
-                  }
-                }
-
-                if (!allTensors) return failure();
-
-                // Check if we're in a function context
-                auto funcOp = op->getParentOfType<func::FuncOp>();
-                if (!funcOp) return failure();
-
-                // Allocate output buffers
-                SmallVector<Value> newOperands = op.getOperands();
-                SmallVector<Type> newResultTypes;
-
-                for (auto resultType : op.getResultTypes()) {
-                  if (auto tensorType = dyn_cast<RankedTensorType>(resultType)) {
-                    auto memrefType = MemRefType::get(tensorType.getShape(), tensorType.getElementType());
-                    auto alloc = rewriter.create<memref::AllocOp>(op.getLoc(), memrefType);
-                    newOperands.push_back(alloc);
-                    newResultTypes.push_back(memrefType);
-                  }
-                }
-
-                if (newOperands.size() == op.getOperands().size()) {
-                  return failure(); // No outputs were bufferized
-                }
-
-                // Create new linalg.generic with mixed operands
-                auto newOp = rewriter.create<linalg::GenericOp>(
-                  op.getLoc(),
-                  newResultTypes,
-                  newOperands.take_front(op.getOperands().size()),
-                  newOperands.drop_front(op.getOperands().size()),
-                  op.getIndexingMaps(),
-                  op.getIteratorTypes(),
-                  op.getBody()->clone(),
-                  op.getAttributes()
-                );
-
-                // Replace original operation
-                for (unsigned i = 0; i < op.getNumResults(); ++i) {
-                  op.getResult(i).replaceAllUsesWith(newOp.getResult(i));
-                }
-                rewriter.eraseOp(op);
-
-                return success();
-              }
-            };
-
-            conservativePatterns.add<ConservativeBufferizePattern>(context);
-
-            GreedyRewriteConfig config;
-            config.maxIterations = 1; // Single pass to avoid infinite loops
-
-            if (failed(applyPatternsAndFoldGreedily(module, std::move(conservativePatterns), config))) {
-              signalPassFailure();
-              return;
-            }
+            signalPassFailure();
+            return;
           }
         }
 
@@ -626,7 +555,7 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
             LogicalResult matchAndRewrite(bufferization::ToTensorOp op,
                                         PatternRewriter &rewriter) const override {
               // Replace to_tensor with its memref operand
-              rewriter.replaceOp(op, op.getMemref());
+              rewriter.replaceOp(op, op->getOperand(0));
               return success();
             }
           };
@@ -636,10 +565,9 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
             using OpRewritePattern::OpRewritePattern;
             LogicalResult matchAndRewrite(bufferization::ToBufferOp op,
                                         PatternRewriter &rewriter) const override {
-              // Replace to_buffer with its tensor operand (if it's a simple tensor)
-              // This is a conservative approach - only eliminate if safe
+              // Replace to_buffer with its tensor operand
               auto tensorOperand = op.getTensor();
-              if (tensorOperand.getType().isa<TensorType>()) {
+              if (isa<TensorType>(tensorOperand.getType())) {
                 rewriter.replaceOp(op, tensorOperand);
                 return success();
               }
@@ -648,15 +576,14 @@ LogicalResult lowerToLLVMIR(ModuleOp module) {
           };
 
           // Run cleanup patterns
-          RewritePatternSet cleanupPatterns(context);
-          cleanupPatterns.add<EliminateToTensorPattern>(context, /*benefit=*/10);
-          cleanupPatterns.add<EliminateToBufferPattern>(context, /*benefit=*/5);
-
           GreedyRewriteConfig config;
-          config.maxIterations = 3;
 
           for (int iteration = 0; iteration < 3; ++iteration) {
-            auto frozenPatterns = mlir::FrozenRewritePatternSet(cleanupPatterns);
+            RewritePatternSet cleanupPatterns(context);
+            cleanupPatterns.add<EliminateToTensorPattern>(context, /*benefit=*/10);
+            cleanupPatterns.add<EliminateToBufferPattern>(context, /*benefit=*/5);
+            
+            auto frozenPatterns = mlir::FrozenRewritePatternSet(std::move(cleanupPatterns));
             if (failed(applyPatternsGreedily(module, frozenPatterns, config))) {
               break; // Stop if patterns fail
             }
@@ -1125,6 +1052,40 @@ LogicalResult emitRiscVCode(ModuleOp module, StringRef outputPath,
   return success();
 }
 
+// Generate C99 code from StableHLO module
+LogicalResult generateCCode(ModuleOp module, StringRef outputFile) {
+  stablehlo::CCodeGenerator generator;
+  
+  // Check for unsupported operations before generating
+  bool hasUnsupported = false;
+  module.walk([&](Operation* op) {
+    if (!stablehlo::COpEmitters::isSupported(op) && 
+        !op->hasTrait<OpTrait::IsTerminator>() &&
+        !isa<func::FuncOp>(op) &&
+        !isa<ModuleOp>(op)) {
+      hasUnsupported = true;
+      op->emitError() << "Operation " << op->getName() 
+                      << " is not supported by C codegen backend";
+    }
+  });
+  
+  if (hasUnsupported) {
+    return failure();
+  }
+  
+  std::string cCode = generator.generateModule(module);
+  
+  std::error_code ec;
+  raw_fd_ostream os(outputFile, ec);
+  if (ec) {
+    return module.emitError("Failed to open output file: " + ec.message());
+  }
+  
+  os << cCode;
+  os.flush();
+  return success();
+}
+
 int main(int argc, char **argv) {
   InitLLVM y(argc, argv);
 
@@ -1165,6 +1126,16 @@ int main(int argc, char **argv) {
   }
 
   llvm::errs() << "Successfully parsed input file\n";
+
+  // Check if we should emit C code
+  if (emitC) {
+    if (failed(generateCCode(*module, outputFilename))) {
+      errs() << "Error: Failed to generate C code\n";
+      return 1;
+    }
+    llvm::errs() << "Successfully generated C99 code to " << outputFilename << "\n";
+    return 0;
+  }
 
   // Lower to LLVM IR
   if (failed(lowerToLLVMIR(*module))) {
