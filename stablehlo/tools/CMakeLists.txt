@@ -14,6 +14,7 @@
 # limitations under the License.
 
 set(LLVM_OPTIONAL_SOURCES
+  StablehloCodegenMain.cpp
   StablehloLspServerMain.cpp
   StablehloOptMain.cpp
   StablehloTranslateMain.cpp
@@ -97,3 +98,41 @@ target_link_libraries(stablehlo-lsp-server PRIVATE ${LIBS})
 # one of our test suites.
 mlir_check_all_link_libraries(stablehlo-lsp-server)
 add_dependencies(check-stablehlo-quick stablehlo-lsp-server)
+
+# stablehlo-codegen
+add_llvm_executable(stablehlo-codegen StablehloCodegenMain.cpp)
+llvm_update_compile_flags(stablehlo-codegen)
+get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
+target_link_libraries(stablehlo-codegen PRIVATE
+  ${dialect_libs}
+  ${conversion_libs}
+  ${extension_libs}
+  MLIRAffineToStandard
+  MLIRArithToLLVM
+  MLIRBufferizationTransforms
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRLLVMToLLVMIRTranslation
+  MLIRBuiltinToLLVMIRTranslation
+  MLIRLinalgTransforms
+  MLIRMemRefToLLVM
+  MLIRSCFToControlFlow
+  MLIRTargetLLVMIRExport
+  MLIRTargetLLVMIRImport
+  MLIRRegisterAllDialects
+  MLIRRegisterAllPasses
+  StablehloLinalgTransforms
+  StablehloRegister
+  StablehloPasses
+  LLVMCore
+  LLVMTarget
+  LLVMRISCVCodeGen
+  LLVMRISCVDesc
+  LLVMRISCVInfo
+  LLVMMC
+  LLVMMCParser
+  LLVMObject
+  LLVMSupport
+)
+
+mlir_check_all_link_libraries(stablehlo-codegen)
