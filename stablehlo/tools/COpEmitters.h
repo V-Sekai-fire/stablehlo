@@ -55,6 +55,9 @@ public:
   std::string emitAnd(stablehlo::AndOp op);
   std::string emitNot(stablehlo::NotOp op);
   
+  /// Emit custom call operation (for library functions)
+  std::string emitCustomCall(stablehlo::CustomCallOp op);
+  
   /// Emit reduction operation
   std::string emitReduce(stablehlo::ReduceOp op);
   

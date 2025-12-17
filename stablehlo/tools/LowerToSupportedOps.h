@@ -27,4 +27,3 @@ std::unique_ptr<Pass> createLowerToSupportedOpsPass();
 } // namespace mlir
 
 #endif // STABLEHLO_TOOLS_LOWER_TO_SUPPORTED_OPS_H_
-

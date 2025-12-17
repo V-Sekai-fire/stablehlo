@@ -47,6 +47,7 @@ bool COpEmitters::isSupported(Operation* op) {
          isa<stablehlo::NotOp>(op) ||
          isa<stablehlo::ConstantOp>(op) ||
          isa<stablehlo::CompareOp>(op) ||
+         isa<stablehlo::CustomCallOp>(op) ||
          isa<stablehlo::ReduceOp>(op) ||
          isa<stablehlo::ConvolutionOp>(op);
 }
@@ -74,6 +75,8 @@ std::string COpEmitters::emitOperation(Operation* op) {
     return emitAnd(andOp);
   } else if (auto notOp = dyn_cast<stablehlo::NotOp>(op)) {
     return emitNot(notOp);
+  } else if (auto customCallOp = dyn_cast<stablehlo::CustomCallOp>(op)) {
+    return emitCustomCall(customCallOp);
   } else if (auto reduceOp = dyn_cast<stablehlo::ReduceOp>(op)) {
     return emitReduce(reduceOp);
   } else if (auto convOp = dyn_cast<stablehlo::ConvolutionOp>(op)) {
@@ -313,6 +316,71 @@ std::string COpEmitters::emitNot(stablehlo::NotOp op) {
     }
   }
   oss << "  }\n";
+  return oss.str();
+}
+
+std::string COpEmitters::emitCustomCall(stablehlo::CustomCallOp op) {
+  // CustomCall operations represent C library function calls
+  // Get the function name from call_target_name attribute
+  StringRef funcName = op.getCallTargetName();
+  
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult(0).getType());
+  if (!resultType) return "";
+  
+  int64_t rank = resultType.getRank();
+  std::string resultName = getValueName(op.getResult(0));
+  std::string resultShapeName = getShapeName(op.getResult(0));
+  
+  std::ostringstream oss;
+  
+  // Scope loop variables to avoid name collisions
+  oss << "  {\n";
+  
+  // Generate loop variables
+  oss << "    " << CIndexUtils::generateLoopVariables(rank) << "\n";
+  
+  // Generate nested loops
+  std::ostringstream body;
+  
+  // Calculate index for result
+  std::vector<std::string> indices;
+  for (int64_t i = 0; i < rank; i++) {
+    indices.push_back("i" + std::to_string(i));
+  }
+  std::string resultIdx = CIndexUtils::generateIndexWithShape(
+      resultName, resultShapeName, indices, rank);
+  
+  // For unary operations (most library functions)
+  if (op.getNumOperands() == 1) {
+    std::string operandName = getValueName(op.getOperand(0));
+    std::string operandIdx = CIndexUtils::generateIndexWithShape(
+        operandName, getShapeName(op.getOperand(0)), indices, rank);
+    body << resultIdx << " = " << funcName.str() << "(" << operandIdx << ");";
+  } else if (op.getNumOperands() == 2) {
+    // For binary operations (like pow, atan2)
+    std::string lhsName = getValueName(op.getOperand(0));
+    std::string rhsName = getValueName(op.getOperand(1));
+    std::string lhsIdx = CIndexUtils::generateIndexWithShape(
+        lhsName, getShapeName(op.getOperand(0)), indices, rank);
+    std::string rhsIdx = CIndexUtils::generateIndexWithShape(
+        rhsName, getShapeName(op.getOperand(1)), indices, rank);
+    body << resultIdx << " = " << funcName.str() << "(" << lhsIdx << ", " << rhsIdx << ");";
+  } else {
+    return ""; // Unsupported
+  }
+  
+  // Generate nested loops with proper indentation
+  std::string loopCode = CIndexUtils::generateNestedLoops(rank, resultShapeName, body.str());
+  std::istringstream loopStream(loopCode);
+  std::string line;
+  while (std::getline(loopStream, line)) {
+    if (!line.empty()) {
+      oss << "    " << line << "\n";
+    }
+  }
+  
+  oss << "  }\n";
+  
   return oss.str();
 }
 
