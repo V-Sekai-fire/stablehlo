@@ -317,6 +317,9 @@ struct ConvertFunctionSignaturesPass
       return type; // Not a tensor, return as-is
     };
     
+    // Use SymbolTable for proper function replacement
+    SymbolTable symbolTable(module);
+    
     // Walk all functions and convert their signatures
     SmallVector<func::FuncOp> funcs;
     module->walk([&](func::FuncOp funcOp) {
@@ -359,31 +362,42 @@ struct ConvertFunctionSignaturesPass
         newReturnTypes.push_back(convertTensorToMemRef(returnType));
       }
       
-      // Create new function type
-      auto newFuncType = mlir::FunctionType::get(context, newInputTypes, newReturnTypes);
-      
-      // Use SymbolTable to properly replace the function
-      SymbolTable symbolTable(module);
-      
-      // Create new function with converted signature
-      OpBuilder builder(funcOp);
-      auto newFunc = func::FuncOp::create(
-          builder, funcOp.getLoc(), funcOp.getName(), newFuncType,
-          funcOp.getSymVisibilityAttr(), funcOp.getArgAttrsAttr(), funcOp.getResAttrsAttr());
-      
-      // Move function body
-      newFunc.getBody().takeBody(funcOp.getBody());
-      
-      // Update entry block arguments to match new input types
-      Block *entryBlock = &newFunc.getBody().front();
+      // CRITICAL: Update entry block arguments FIRST to memref types
+      // This must happen before updating the function signature
+      Block *entryBlock = &funcOp.getBody().front();
       for (unsigned i = 0; i < newInputTypes.size() && i < entryBlock->getNumArguments(); ++i) {
-        entryBlock->getArgument(i).setType(newInputTypes[i]);
+        auto arg = entryBlock->getArgument(i);
+        auto oldType = arg.getType();
+        auto newType = newInputTypes[i];
+        
+        if (oldType != newType) {
+          // Update argument type to memref
+          // After bufferization, body operations use memrefs, so arguments should be memrefs too
+          arg.setType(newType);
+        }
       }
       
+      // Get return types from return operations (after processing them)
+      SmallVector<mlir::Type> actualReturnTypes;
+      funcOp.walk([&](func::ReturnOp returnOp) {
+        for (auto operand : returnOp.getOperands()) {
+          actualReturnTypes.push_back(operand.getType());
+        }
+      });
+      
+      // If no returns found, use the converted return types
+      if (actualReturnTypes.empty()) {
+        actualReturnTypes = newReturnTypes;
+      }
+      
+      // Create new function type based on actual argument and return types
+      auto newFuncType = mlir::FunctionType::get(context, newInputTypes, actualReturnTypes);
+      
+      // Update function signature using setFunctionType
+      funcOp.setFunctionType(newFuncType);
+      
       // Update return operations - after bufferization, return values should already be memrefs
-      newFunc.walk([&](func::ReturnOp returnOp) {
-        // After bufferization, return operands should already be memrefs
-        // If they're tensors (from to_tensor ops), we need to eliminate those
+      funcOp.walk([&](func::ReturnOp returnOp) {
         SmallVector<mlir::Value> newOperands;
         for (unsigned i = 0; i < returnOp.getNumOperands(); ++i) {
           auto operand = returnOp.getOperand(i);
@@ -396,16 +410,22 @@ struct ConvertFunctionSignaturesPass
           newOperands.push_back(operand);
         }
         
-        // Create new return with correct operands
-        OpBuilder returnBuilder(returnOp);
-        returnBuilder.create<func::ReturnOp>(returnOp.getLoc(), newOperands);
-        returnOp.erase();
+        // Only update if operands changed
+        if (newOperands.size() == returnOp.getNumOperands()) {
+          bool changed = false;
+          for (unsigned i = 0; i < newOperands.size(); ++i) {
+            if (newOperands[i] != returnOp.getOperand(i)) {
+              changed = true;
+              break;
+            }
+          }
+          if (changed) {
+            OpBuilder returnBuilder(returnOp);
+            returnBuilder.create<func::ReturnOp>(returnOp.getLoc(), newOperands);
+            returnOp.erase();
+          }
+        }
       });
-      
-      // Replace old function with new one using SymbolTable
-      // First insert the new function, then erase the old one
-      symbolTable.insert(newFunc);
-      funcOp.erase();
     }
   }
 };
