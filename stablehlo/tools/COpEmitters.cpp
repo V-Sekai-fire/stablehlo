@@ -40,6 +40,9 @@ bool COpEmitters::isSupported(Operation* op) {
          isa<stablehlo::MulOp>(op) ||
          isa<stablehlo::SubtractOp>(op) ||
          isa<stablehlo::DivOp>(op) ||
+         isa<stablehlo::MaxOp>(op) ||
+         isa<stablehlo::RemOp>(op) ||
+         isa<stablehlo::SelectOp>(op) ||
          isa<stablehlo::ConstantOp>(op) ||
          isa<stablehlo::CompareOp>(op) ||
          isa<stablehlo::ReduceOp>(op) ||
@@ -55,6 +58,12 @@ std::string COpEmitters::emitOperation(Operation* op) {
     return emitSubtract(subOp);
   } else if (auto divOp = dyn_cast<stablehlo::DivOp>(op)) {
     return emitDivide(divOp);
+  } else if (auto maxOp = dyn_cast<stablehlo::MaxOp>(op)) {
+    return emitMaximum(maxOp);
+  } else if (auto remOp = dyn_cast<stablehlo::RemOp>(op)) {
+    return emitRemainder(remOp);
+  } else if (auto selectOp = dyn_cast<stablehlo::SelectOp>(op)) {
+    return emitSelect(selectOp);
   } else if (auto constOp = dyn_cast<stablehlo::ConstantOp>(op)) {
     return emitConstant(constOp);
   } else if (auto cmpOp = dyn_cast<stablehlo::CompareOp>(op)) {
@@ -82,6 +91,116 @@ std::string COpEmitters::emitSubtract(stablehlo::SubtractOp op) {
 
 std::string COpEmitters::emitDivide(stablehlo::DivOp op) {
   return emitElementWiseLoop(op, "/", op.getLhs(), op.getRhs(), op.getResult());
+}
+
+std::string COpEmitters::emitMaximum(stablehlo::MaxOp op) {
+  // Use ternary operator: result = (lhs > rhs) ? lhs : rhs
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!resultType) return "";
+  
+  int64_t rank = resultType.getRank();
+  std::string lhsName = getValueName(op.getLhs());
+  std::string rhsName = getValueName(op.getRhs());
+  std::string resultName = getValueName(op.getResult());
+  std::string resultShapeName = getShapeName(op.getResult());
+  
+  std::ostringstream oss;
+  
+  // Scope loop variables to avoid name collisions between operations
+  oss << "  {\n";
+  
+  // Generate loop variables
+  std::vector<std::string> indices;
+  for (int64_t i = 0; i < rank; i++) {
+    indices.push_back("i" + std::to_string(i));
+  }
+  oss << "    " << CIndexUtils::generateLoopVariables(rank) << "\n";
+  
+  // Generate nested loops
+  std::ostringstream body;
+  
+  // Calculate indices for lhs, rhs, and result
+  std::string lhsIdx = CIndexUtils::generateIndexWithShape(
+      lhsName, getShapeName(op.getLhs()), indices, rank);
+  std::string rhsIdx = CIndexUtils::generateIndexWithShape(
+      rhsName, getShapeName(op.getRhs()), indices, rank);
+  std::string resultIdx = CIndexUtils::generateIndexWithShape(
+      resultName, resultShapeName, indices, rank);
+  
+  body << resultIdx << " = (" << lhsIdx << " > " << rhsIdx << ") ? " 
+       << lhsIdx << " : " << rhsIdx << ";";
+  
+  // Generate nested loops with proper indentation
+  std::string loopCode = CIndexUtils::generateNestedLoops(rank, resultShapeName, body.str());
+  std::istringstream loopStream(loopCode);
+  std::string line;
+  while (std::getline(loopStream, line)) {
+    if (!line.empty()) {
+      oss << "    " << line << "\n";
+    }
+  }
+  
+  oss << "  }\n";
+  
+  return oss.str();
+}
+
+std::string COpEmitters::emitRemainder(stablehlo::RemOp op) {
+  return emitElementWiseLoop(op, "%", op.getLhs(), op.getRhs(), op.getResult());
+}
+
+std::string COpEmitters::emitSelect(stablehlo::SelectOp op) {
+  // Generate ternary operator: result = pred ? onTrue : onFalse
+  auto resultType = dyn_cast<RankedTensorType>(op.getResult().getType());
+  if (!resultType) return "";
+  
+  int64_t rank = resultType.getRank();
+  std::string predName = getValueName(op.getPred());
+  std::string onTrueName = getValueName(op.getOnTrue());
+  std::string onFalseName = getValueName(op.getOnFalse());
+  std::string resultName = getValueName(op.getResult());
+  std::string resultShapeName = getShapeName(op.getResult());
+  
+  std::ostringstream oss;
+  
+  // Scope loop variables to avoid name collisions between operations
+  oss << "  {\n";
+  
+  // Generate loop variables
+  std::vector<std::string> indices;
+  for (int64_t i = 0; i < rank; i++) {
+    indices.push_back("i" + std::to_string(i));
+  }
+  oss << "    " << CIndexUtils::generateLoopVariables(rank) << "\n";
+  
+  // Generate nested loops
+  std::ostringstream body;
+  
+  // Calculate indices for pred, onTrue, onFalse, and result
+  std::string predIdx = CIndexUtils::generateIndexWithShape(
+      predName, getShapeName(op.getPred()), indices, rank);
+  std::string onTrueIdx = CIndexUtils::generateIndexWithShape(
+      onTrueName, getShapeName(op.getOnTrue()), indices, rank);
+  std::string onFalseIdx = CIndexUtils::generateIndexWithShape(
+      onFalseName, getShapeName(op.getOnFalse()), indices, rank);
+  std::string resultIdx = CIndexUtils::generateIndexWithShape(
+      resultName, resultShapeName, indices, rank);
+  
+  body << resultIdx << " = " << predIdx << " ? " << onTrueIdx << " : " << onFalseIdx << ";";
+  
+  // Generate nested loops with proper indentation
+  std::string loopCode = CIndexUtils::generateNestedLoops(rank, resultShapeName, body.str());
+  std::istringstream loopStream(loopCode);
+  std::string line;
+  while (std::getline(loopStream, line)) {
+    if (!line.empty()) {
+      oss << "    " << line << "\n";
+    }
+  }
+  
+  oss << "  }\n";
+  
+  return oss.str();
 }
 
 std::string COpEmitters::emitConstant(stablehlo::ConstantOp op) {

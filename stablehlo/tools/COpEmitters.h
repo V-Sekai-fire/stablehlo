@@ -39,12 +39,17 @@ public:
   std::string emitMultiply(stablehlo::MulOp op);
   std::string emitSubtract(stablehlo::SubtractOp op);
   std::string emitDivide(stablehlo::DivOp op);
+  std::string emitMaximum(stablehlo::MaxOp op);
+  std::string emitRemainder(stablehlo::RemOp op);
   
   /// Emit constant operation
   std::string emitConstant(stablehlo::ConstantOp op);
   
   /// Emit comparison operations
   std::string emitCompare(stablehlo::CompareOp op);
+  
+  /// Emit select operation (conditional)
+  std::string emitSelect(stablehlo::SelectOp op);
   
   /// Emit reduction operation
   std::string emitReduce(stablehlo::ReduceOp op);
